@@ -1,160 +1,176 @@
-# SystemAudioTranscriber
+# Game Chat Translator
 
-Minimal macOS command-line prototype for capturing system audio with ScreenCaptureKit, keeping captured audio in memory, converting it to 16 kHz mono Float32 PCM, and sending PCM directly to whisper.cpp through an in-process C/C++ bridge.
+Local macOS command-line prototype for near real-time game voice-chat translation.
+
+It captures macOS system audio with ScreenCaptureKit, keeps captured audio in RAM, runs whisper.cpp in-process, and can translate detected speech to English locally. It was built for setups like PS Remote Play audio while playing on a PS5/TV.
+
+## What It Does
+
+- Captures system audio directly with ScreenCaptureKit.
+- Does not use the microphone.
+- Converts audio in memory to 16 kHz mono Float32 PCM.
+- Uses local whisper.cpp through a C/C++ bridge.
+- Supports local speech-to-English translation with `--translate-to en`.
+- Uses voice activity gating so silence and most game noise are not sent to Whisper.
+- In `--realtime` mode, groups speech into utterances instead of printing overlapping partial windows.
 
 ## Requirements
 
 - macOS 13+
-- Xcode command line tools with Swift 5.9+
-- Local `whisper.cpp` checkout under `vendor/whisper.cpp`
-- A local whisper.cpp model file, for example `models/ggml-base.bin`
-
-macOS permission is required:
-
-System Settings -> Privacy & Security -> Screen & System Audio Recording
-
-Enable permission for the terminal app that runs `swift run`.
-
-## Create Project
+- Swift 5.9+
+- Xcode Command Line Tools
+- Homebrew `cmake`
+- Screen & System Audio Recording permission for your terminal app
 
 ```sh
-mkdir -p SystemAudioTranscriber
-cd SystemAudioTranscriber
-swift package init --type executable
-mkdir -p Sources/CWhisperBridge/include vendor models
+brew install cmake
 ```
 
-This repository already contains the intended final layout:
+Enable permission:
 
 ```text
-SystemAudioTranscriber/
-  Package.swift
-  Sources/
-    SystemAudioTranscriber/
-      main.swift
-      SystemAudioCapture.swift
-      PCMConverter.swift
-      AudioRingBuffer.swift
-      AudioLevelMeter.swift
-      TranscriptionScheduler.swift
-      WhisperTranscriber.swift
-    CWhisperBridge/
-      include/
-        whisper_bridge.h
-      whisper_bridge.cpp
-  vendor/
-    whisper.cpp/
+System Settings -> Privacy & Security -> Screen & System Audio Recording
 ```
 
-## Add whisper.cpp
+After changing this permission, quit and reopen Terminal.
+
+## Clone
 
 ```sh
-git submodule add https://github.com/ggml-org/whisper.cpp vendor/whisper.cpp
+git clone --recursive https://github.com/Pfrommer1982/game-chat-translator.git
+cd game-chat-translator
 ```
 
-or, without submodules:
+If you already cloned without submodules:
 
 ```sh
-git clone https://github.com/ggml-org/whisper.cpp vendor/whisper.cpp
+git submodule update --init --recursive
 ```
 
 ## Build whisper.cpp
 
-The SwiftPM package links against the local whisper.cpp build output. Build whisper.cpp first:
+This project links against a local whisper.cpp build. Metal is disabled for now because the current tested setup was more stable with CPU/Accelerate.
 
 ```sh
-cmake -S vendor/whisper.cpp -B vendor/whisper.cpp/build -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF
+cmake -S vendor/whisper.cpp -B vendor/whisper.cpp/build \
+  -DWHISPER_BUILD_TESTS=OFF \
+  -DWHISPER_BUILD_EXAMPLES=OFF \
+  -DGGML_METAL=OFF
+
 cmake --build vendor/whisper.cpp/build --config Release
 ```
 
-whisper.cpp changes its library layout from time to time. `Package.swift` assumes the common CMake output paths:
+## Download A Model
 
-- `vendor/whisper.cpp/build/src/libwhisper.*`
-- `vendor/whisper.cpp/build/ggml/src/libggml.*`
-
-If your checkout emits additional ggml split libraries, add their `-L` and `-l` entries in `Package.swift`. Do not work around this by invoking the whisper CLI with audio files.
-
-## Download Model
-
-Use whisper.cpp's model script:
+Recommended first model:
 
 ```sh
-bash vendor/whisper.cpp/models/download-ggml-model.sh base
 mkdir -p models
-cp vendor/whisper.cpp/models/ggml-base.bin models/ggml-base.bin
+curl -L --fail -o models/ggml-small.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
 
-The model is read from disk. Captured audio is never written to disk.
+`small` is a good baseline for multilingual game chat. `base` is faster but less accurate.
 
-## Build
+Do not commit model files to GitHub.
+
+## Build The App
 
 ```sh
 swift build
 ```
 
-## Run
+## Run: Game Chat To English
 
-Milestone 1 capture/debug mode:
-
-```sh
-swift run SystemAudioTranscriber --verbose
-```
-
-Milestone 2 local transcription mode:
+Balanced live game-chat preset:
 
 ```sh
 swift run SystemAudioTranscriber \
-  --model ./models/ggml-base.bin \
-  --chunk-seconds 5 \
+  --model ./models/ggml-small.bin \
   --language auto \
-  --verbose
+  --translate-to en \
+  --realtime \
+  --threads 6 \
+  --utterance-end-silence 0.45 \
+  --utterance-max-seconds 5
 ```
 
-Expected startup:
+Better for longer sentences and testing with clean spoken text:
 
-```text
-Listening to system audio...
-Audio: 16000 Hz mono Float32
-Buffer: 5.0s
+```sh
+swift run SystemAudioTranscriber \
+  --model ./models/ggml-small.bin \
+  --language auto \
+  --translate-to en \
+  --realtime \
+  --threads 6 \
+  --utterance-end-silence 0.75 \
+  --utterance-max-seconds 9
 ```
 
-Example transcript output:
+For raw transcription without translation:
 
-```text
-[detected: en] this is a test sentence
-[detected: de] das ist ein test
-[detected: nl] dit is een test
+```sh
+swift run SystemAudioTranscriber \
+  --model ./models/ggml-small.bin \
+  --language auto \
+  --realtime \
+  --threads 6
 ```
 
-## Memory-Only Audio Path
+## Useful Options
 
-ScreenCaptureKit emits system audio as `CMSampleBuffer` values through `SCStreamOutput` for `.audio`. `PCMConverter` copies each sample buffer into an `AVAudioPCMBuffer`, uses `AVAudioConverter` when needed, and returns 16 kHz mono Float32 samples. `AudioRingBuffer` stores only a bounded rolling buffer in RAM. `TranscriptionScheduler` copies a short chunk from that ring buffer and passes `[Float]` directly to `WhisperTranscriber`, which calls `whisper_bridge_transcribe` with a raw `float *` and sample count. The bridge calls `whisper_full` in-process.
+- `--translate-to en`: translate detected speech to English locally.
+- `--language auto`: let Whisper detect the spoken language.
+- `--language fr`: force a known source language when testing.
+- `--realtime`: use utterance-based live mode for voice chat.
+- `--threads 6`: CPU threads for Whisper.
+- `--silence-threshold 0.003`: raise to ignore more noise, lower if speech is missed.
+- `--utterance-end-silence 0.45`: lower means faster output after speech pauses.
+- `--utterance-max-seconds 5`: maximum speech segment length before forced translation.
+- `--verbose`: show capture/VAD/transcription diagnostics.
 
-There is no WAV stage, no temporary captured audio file, and no whisper CLI invocation.
+## Privacy
 
-## Privacy Checklist
+Captured audio is not written to disk.
 
-- No WAV files are created.
-- No temporary audio files are created.
-- Captured audio is not written to `/tmp`.
-- Captured audio is not written to disk anywhere.
-- Audio remains in process memory as Float32 PCM.
-- Old rolling-buffer samples are discarded after the configured RAM duration.
-- Transcription chunks are zeroed after bridge use where practical.
-- No cloud API or paid service is used.
-- No microphone input is used.
-- `AVAudioEngine.inputNode` is not used.
-- BlackHole, Loopback, Soundflower, aggregate devices, and virtual drivers are not used.
-- System audio capture uses ScreenCaptureKit with `SCStreamConfiguration.capturesAudio = true`.
-- Current process audio is excluded where the OS exposes `excludesCurrentProcessAudio`.
+- No WAV files.
+- No temporary captured-audio files.
+- No microphone input.
+- No cloud APIs.
+- No virtual audio drivers.
+- Audio exists as in-process RAM buffers only.
+- Model files are read from disk, but captured audio is not saved.
+- Recognized text is printed to stdout.
 
-## TODO: Local Translation Only
+## Known Limits
 
-- Translation must be local only.
-- Do not send transcripts to cloud APIs.
-- Translation should consume transcript text only, not raw audio.
-- Possible engines:
-  - Argos Translate
-  - LibreTranslate running locally
-  - CTranslate2/NLLB
+- This is a CLI alpha, not a polished macOS app.
+- Game audio and voice chat are mixed together by Remote Play, so loud explosions/music can still hurt accuracy.
+- Whisper translation is best with complete phrases. Extremely short chunks are faster but less accurate.
+- `small` is the practical starting point. `base` is faster but worse; larger models are better but slower.
+
+## Troubleshooting
+
+If you see silence only:
+
+- Make sure audio is actually playing.
+- Check Screen & System Audio Recording permission.
+- Restart Terminal after granting permission.
+- Try `--verbose`.
+
+If it hallucinates when nobody is talking:
+
+- Increase `--silence-threshold`, for example `0.005`.
+- Lower game audio and raise chat audio in PlayStation/Remote Play settings.
+
+If it skips speech:
+
+- Lower `--silence-threshold`, for example `0.002`.
+- Increase `--utterance-end-silence` for longer speech.
+
+If model loading fails:
+
+- Re-download the model with `curl -L --fail`.
+- `ggml-small.bin` should be hundreds of MB, not a tiny partial download.
 
