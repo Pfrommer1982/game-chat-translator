@@ -80,6 +80,14 @@ Do not commit model files to GitHub.
 swift build
 ```
 
+## Run The macOS GUI
+
+```sh
+swift run GameChatTranslatorApp
+```
+
+The GUI lets you choose a model, select a preset, start/stop translation, and copy or clear the live transcript. It currently launches the translator engine as a local helper process, so keep running it from the repository folder for development builds.
+
 ## Run: Game Chat To English
 
 Balanced live game-chat preset:
@@ -173,4 +181,3 @@ If model loading fails:
 
 - Re-download the model with `curl -L --fail`.
 - `ggml-small.bin` should be hundreds of MB, not a tiny partial download.
-

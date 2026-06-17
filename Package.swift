@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "SystemAudioTranscriber", targets: ["SystemAudioTranscriber"])
+        .executable(name: "SystemAudioTranscriber", targets: ["SystemAudioTranscriber"]),
+        .executable(name: "GameChatTranslatorApp", targets: ["GameChatTranslatorApp"])
     ],
     dependencies: [],
     targets: [
@@ -43,6 +44,13 @@ let package = Package(
                     "-lwhisper",
                     "-lggml"
                 ])
+            ]
+        ),
+        .executableTarget(
+            name: "GameChatTranslatorApp",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI")
             ]
         )
     ]
