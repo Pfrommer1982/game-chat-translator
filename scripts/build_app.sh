@@ -92,6 +92,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>NSApplication</string>
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Game Chat Translator captures system audio locally so it can transcribe and translate voice chat. Captured audio is kept in memory and is not saved to disk.</string>
 </dict>
 </plist>
 PLIST

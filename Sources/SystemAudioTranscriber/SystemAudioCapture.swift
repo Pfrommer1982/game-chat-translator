@@ -20,7 +20,7 @@ enum SystemAudioCaptureError: Error, LocalizedError {
             macOS may require permission:
             System Settings -> Privacy & Security -> Screen & System Audio Recording
 
-            Enable permission for the terminal app you are using, then run this command again.
+            Enable permission for Game Chat Translator, then quit and reopen the app.
             """
         }
     }
@@ -84,4 +84,3 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
         onAudio(sampleBuffer)
     }
 }
-

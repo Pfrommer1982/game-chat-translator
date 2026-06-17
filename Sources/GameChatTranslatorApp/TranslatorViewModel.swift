@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -76,6 +77,10 @@ final class TranslatorViewModel: ObservableObject {
     func start() {
         guard canStart else { return }
 
+        guard ensureScreenRecordingPermission() else {
+            return
+        }
+
         let command: LaunchCommand
         do {
             command = try makeLaunchCommand()
@@ -112,7 +117,12 @@ final class TranslatorViewModel: ObservableObject {
                 self?.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
                 self?.stderrPipe?.fileHandleForReading.readabilityHandler = nil
                 self?.isRunning = false
-                self?.statusText = process.terminationStatus == 0 ? "Stopped" : "Stopped with error"
+                if process.terminationStatus == 0 {
+                    self?.statusText = "Stopped"
+                } else {
+                    self?.statusText = "Stopped with error"
+                    self?.appendLine("Engine stopped with exit code \(process.terminationStatus).")
+                }
                 self?.process = nil
             }
         }
@@ -120,6 +130,7 @@ final class TranslatorViewModel: ObservableObject {
         do {
             transcriptLines.removeAll()
             statusText = "Starting..."
+            appendLine("Starting translation engine...")
             self.process = process
             self.stdoutPipe = stdoutPipe
             self.stderrPipe = stderrPipe
@@ -147,6 +158,24 @@ final class TranslatorViewModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(transcriptLines.joined(separator: "\n"), forType: .string)
+    }
+
+    private func ensureScreenRecordingPermission() -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+
+        statusText = "Permission needed"
+        appendLine("macOS needs Screen & System Audio Recording permission before system audio can be captured.")
+        appendLine("A permission prompt may appear. If it does not, click Open Privacy Settings and enable Game Chat Translator, then quit and reopen the app.")
+
+        let granted = CGRequestScreenCaptureAccess()
+        if !granted {
+            appendLine("Permission is not active yet. Enable it in System Settings, then quit and reopen Game Chat Translator.")
+            return false
+        }
+
+        return true
     }
 
     private func makeLaunchCommand() throws -> LaunchCommand {
@@ -262,15 +291,20 @@ final class TranslatorViewModel: ObservableObject {
 
     private func appendStatusOutput(_ text: String) {
         for line in text.split(whereSeparator: \.isNewline).map(String.init) {
-            if line.contains("Loading whisper model") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if trimmed.contains("Loading whisper model") {
                 statusText = "Loading model"
-            } else if line.contains("Model loaded") {
+                appendLine(trimmed)
+            } else if trimmed.contains("Model loaded") {
                 statusText = "Listening"
-            } else if line.contains("Screen & System Audio Recording") {
+                appendLine(trimmed)
+            } else if trimmed.contains("Screen & System Audio Recording") {
                 statusText = "Permission needed"
-                appendLine(line)
-            } else if line.lowercased().contains("error") {
-                appendLine(line)
+                appendLine(trimmed)
+            } else {
+                appendLine(trimmed)
             }
         }
     }
