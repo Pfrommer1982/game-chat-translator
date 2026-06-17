@@ -38,6 +38,14 @@ struct TranslatorWindow: View {
                         Image(systemName: "folder")
                     }
                     .help("Choose model")
+
+                    Button {
+                        viewModel.useBundledModel()
+                    } label: {
+                        Text("Bundled")
+                    }
+                    .disabled(!viewModel.hasBundledModel)
+                    .help("Use bundled model")
                 }
             }
 

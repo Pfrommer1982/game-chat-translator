@@ -35,7 +35,7 @@ final class TranslatorViewModel: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        self.modelPath = defaults.string(forKey: "modelPath") ?? Self.defaultModelPath()
+        self.modelPath = Self.initialModelPath(storedPath: defaults.string(forKey: "modelPath"))
         self.sourceLanguage = defaults.string(forKey: "sourceLanguage") ?? "auto"
         let storedThreads = defaults.integer(forKey: "threads")
         self.threads = storedThreads > 0 ? storedThreads : 6
@@ -53,6 +53,10 @@ final class TranslatorViewModel: ObservableObject {
         !isRunning && !modelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var hasBundledModel: Bool {
+        Self.bundledModelPath() != nil
+    }
+
     func chooseModel() {
         let panel = NSOpenPanel()
         panel.title = "Choose Whisper Model"
@@ -65,6 +69,18 @@ final class TranslatorViewModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             modelPath = url.path
         }
+    }
+
+    func useBundledModel() {
+        guard let bundledModel = Self.bundledModelPath() else {
+            statusText = "No bundled model"
+            appendLine("No bundled whisper model was found in this app.")
+            return
+        }
+
+        modelPath = bundledModel
+        statusText = "Bundled model selected"
+        appendLine("Using bundled model: \(bundledModel)")
     }
 
     func openPrivacySettings() {
@@ -238,14 +254,70 @@ final class TranslatorViewModel: ObservableObject {
     }
 
     private static func defaultModelPath() -> String {
-        if let bundledModel = Bundle.main.resourceURL?
-            .appendingPathComponent("models/ggml-small.bin")
-            .standardizedFileURL
-            .path,
-           FileManager.default.fileExists(atPath: bundledModel) {
+        if let bundledModel = bundledModelPath() {
             return bundledModel
         }
         return "./models/ggml-small.bin"
+    }
+
+    private static func initialModelPath(storedPath: String?) -> String {
+        guard let storedPath,
+              !storedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return defaultModelPath()
+        }
+
+        let trimmed = storedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isDefaultRelativeModelPath(trimmed), let bundledModel = bundledModelPath() {
+            return bundledModel
+        }
+
+        if existingModelPath(for: trimmed) != nil {
+            return trimmed
+        }
+
+        return defaultModelPath()
+    }
+
+    private static func bundledModelPath() -> String? {
+        guard let bundledModel = Bundle.main.resourceURL?
+            .appendingPathComponent("models/ggml-small.bin")
+            .standardizedFileURL
+            .path,
+              FileManager.default.fileExists(atPath: bundledModel) else {
+            return nil
+        }
+        return bundledModel
+    }
+
+    private static func existingModelPath(for path: String) -> String? {
+        let expanded = (path as NSString).expandingTildeInPath
+        let fileManager = FileManager.default
+
+        if expanded.hasPrefix("/") {
+            return fileManager.fileExists(atPath: expanded) ? expanded : nil
+        }
+
+        let currentDirectoryPath = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent(expanded)
+            .standardizedFileURL
+            .path
+        if fileManager.fileExists(atPath: currentDirectoryPath) {
+            return currentDirectoryPath
+        }
+
+        if let resourcePath = Bundle.main.resourceURL?
+            .appendingPathComponent(expanded)
+            .standardizedFileURL
+            .path,
+           fileManager.fileExists(atPath: resourcePath) {
+            return resourcePath
+        }
+
+        return nil
+    }
+
+    private static func isDefaultRelativeModelPath(_ path: String) -> Bool {
+        path == "./models/ggml-small.bin" || path == "models/ggml-small.bin"
     }
 
     private func bundledHelperURL() -> URL? {
