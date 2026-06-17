@@ -147,7 +147,7 @@ enum AppError: Error, LocalizedError {
 
     static let usage = """
     Usage:
-      swift run SystemAudioTranscriber --model ./models/ggml-base.bin [options]
+      SystemAudioTranscriber --model ./models/ggml-base.bin [options]
 
     Options:
       --model <path>              Enable milestone 2 transcription with a local whisper.cpp model.

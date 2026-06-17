@@ -22,6 +22,7 @@ let package = Package(
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("Accelerate"),
                 .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/src",
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src",
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-blas",

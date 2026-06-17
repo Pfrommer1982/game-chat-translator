@@ -16,7 +16,7 @@ It captures macOS system audio with ScreenCaptureKit, keeps captured audio in RA
 
 ## Requirements
 
-- macOS 13+
+- macOS 13.3+
 - Swift 5.9+
 - Xcode Command Line Tools
 - Homebrew `cmake`
@@ -55,7 +55,8 @@ This project links against a local whisper.cpp build. Metal is disabled for now 
 cmake -S vendor/whisper.cpp -B vendor/whisper.cpp/build \
   -DWHISPER_BUILD_TESTS=OFF \
   -DWHISPER_BUILD_EXAMPLES=OFF \
-  -DGGML_METAL=OFF
+  -DGGML_METAL=OFF \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
 
 cmake --build vendor/whisper.cpp/build --config Release
 ```
@@ -86,7 +87,47 @@ swift build
 swift run GameChatTranslatorApp
 ```
 
-The GUI lets you choose a model, select a preset, start/stop translation, and copy or clear the live transcript. It currently launches the translator engine as a local helper process, so keep running it from the repository folder for development builds.
+The GUI lets you choose a model, select a preset, start/stop translation, open macOS privacy settings, and copy or clear the live transcript.
+
+In development it launches the translator through SwiftPM. In a packaged `.app`, it launches the bundled `SystemAudioTranscriber` helper directly.
+
+## Build A Release App
+
+Build a standalone macOS app bundle:
+
+```sh
+./scripts/build_app.sh
+```
+
+This creates:
+
+```text
+dist/GameChatTranslator.app
+dist/GameChatTranslator-0.1.0.zip
+```
+
+If `models/ggml-small.bin` exists, the script bundles it into the app so first launch works without choosing a model. To ship without a bundled model:
+
+```sh
+INCLUDE_MODEL=none ./scripts/build_app.sh
+```
+
+To bundle another model:
+
+```sh
+INCLUDE_MODEL="$PWD/models/ggml-medium.bin" ./scripts/build_app.sh
+```
+
+The default local build is ad-hoc signed for testing. For public distribution you need an Apple Developer ID certificate:
+
+```sh
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build_app.sh
+xcrun notarytool submit dist/GameChatTranslator-0.1.0.zip --keychain-profile <profile> --wait
+xcrun stapler staple dist/GameChatTranslator.app
+ditto -c -k --keepParent dist/GameChatTranslator.app dist/GameChatTranslator-0.1.0-notarized.zip
+```
+
+Upload the notarized zip as a GitHub Release asset.
 
 ## Run: Game Chat To English
 
@@ -153,7 +194,7 @@ Captured audio is not written to disk.
 
 ## Known Limits
 
-- This is a CLI alpha, not a polished macOS app.
+- The packaged app is unsigned/ad-hoc unless you build it with your own Developer ID identity.
 - Game audio and voice chat are mixed together by Remote Play, so loud explosions/music can still hurt accuracy.
 - Whisper translation is best with complete phrases. Extremely short chunks are faster but less accurate.
 - `small` is the practical starting point. `base` is faster but worse; larger models are better but slower.

@@ -35,7 +35,7 @@ final class TranslatorViewModel: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        self.modelPath = defaults.string(forKey: "modelPath") ?? "./models/ggml-small.bin"
+        self.modelPath = defaults.string(forKey: "modelPath") ?? Self.defaultModelPath()
         self.sourceLanguage = defaults.string(forKey: "sourceLanguage") ?? "auto"
         let storedThreads = defaults.integer(forKey: "threads")
         self.threads = storedThreads > 0 ? storedThreads : 6
@@ -67,17 +67,31 @@ final class TranslatorViewModel: ObservableObject {
         }
     }
 
+    func openPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     func start() {
         guard canStart else { return }
 
-        let args = commandArguments()
+        let command: LaunchCommand
+        do {
+            command = try makeLaunchCommand()
+        } catch {
+            statusText = "Configuration error"
+            appendLine("Error: \(error.localizedDescription)")
+            return
+        }
+
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = args
-        process.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments
+        process.currentDirectoryURL = command.currentDirectoryURL
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
@@ -111,7 +125,7 @@ final class TranslatorViewModel: ObservableObject {
             self.stderrPipe = stderrPipe
             try process.run()
             isRunning = true
-            statusText = "Listening"
+            statusText = command.isBundledHelper ? "Listening" : "Listening (dev)"
         } catch {
             statusText = "Could not start translator"
             appendLine("Error: \(error.localizedDescription)")
@@ -135,9 +149,30 @@ final class TranslatorViewModel: ObservableObject {
         pasteboard.setString(transcriptLines.joined(separator: "\n"), forType: .string)
     }
 
-    private func commandArguments() -> [String] {
+    private func makeLaunchCommand() throws -> LaunchCommand {
+        let model = try resolvedModelPath()
+        let translatorArgs = commandArguments(modelPath: model)
+
+        if let helperURL = bundledHelperURL(),
+           FileManager.default.isExecutableFile(atPath: helperURL.path) {
+            return LaunchCommand(
+                executableURL: helperURL,
+                arguments: translatorArgs,
+                currentDirectoryURL: Bundle.main.resourceURL,
+                isBundledHelper: true
+            )
+        }
+
+        return LaunchCommand(
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["swift", "run", "SystemAudioTranscriber"] + translatorArgs,
+            currentDirectoryURL: URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+            isBundledHelper: false
+        )
+    }
+
+    private func commandArguments(modelPath: String) -> [String] {
         var args = [
-            "swift", "run", "SystemAudioTranscriber",
             "--model", modelPath,
             "--language", sourceLanguage,
             "--translate-to", "en",
@@ -162,6 +197,61 @@ final class TranslatorViewModel: ObservableObject {
         return args
     }
 
+    private func resolvedModelPath() throws -> String {
+        let trimmed = modelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ViewModelError.missingModel("Choose a whisper.cpp model first.")
+        }
+
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        let fileManager = FileManager.default
+        if expanded.hasPrefix("/") {
+            guard fileManager.fileExists(atPath: expanded) else {
+                throw ViewModelError.missingModel("Model not found: \(expanded)")
+            }
+            return expanded
+        }
+
+        let currentDirectoryPath = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent(expanded)
+            .standardizedFileURL
+            .path
+        if fileManager.fileExists(atPath: currentDirectoryPath) {
+            return currentDirectoryPath
+        }
+
+        if let resourcePath = Bundle.main.resourceURL?
+            .appendingPathComponent(expanded)
+            .standardizedFileURL
+            .path,
+           fileManager.fileExists(atPath: resourcePath) {
+            return resourcePath
+        }
+
+        throw ViewModelError.missingModel("Model not found: \(expanded)")
+    }
+
+    private static func defaultModelPath() -> String {
+        if let bundledModel = Bundle.main.resourceURL?
+            .appendingPathComponent("models/ggml-small.bin")
+            .standardizedFileURL
+            .path,
+           FileManager.default.fileExists(atPath: bundledModel) {
+            return bundledModel
+        }
+        return "./models/ggml-small.bin"
+    }
+
+    private func bundledHelperURL() -> URL? {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            return nil
+        }
+        return Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("SystemAudioTranscriber")
+    }
+
     private func appendOutput(_ text: String) {
         text
             .split(whereSeparator: \.isNewline)
@@ -176,6 +266,9 @@ final class TranslatorViewModel: ObservableObject {
                 statusText = "Loading model"
             } else if line.contains("Model loaded") {
                 statusText = "Listening"
+            } else if line.contains("Screen & System Audio Recording") {
+                statusText = "Permission needed"
+                appendLine(line)
             } else if line.lowercased().contains("error") {
                 appendLine(line)
             }
@@ -190,3 +283,20 @@ final class TranslatorViewModel: ObservableObject {
     }
 }
 
+private struct LaunchCommand {
+    let executableURL: URL
+    let arguments: [String]
+    let currentDirectoryURL: URL?
+    let isBundledHelper: Bool
+}
+
+private enum ViewModelError: LocalizedError {
+    case missingModel(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingModel(let message):
+            return message
+        }
+    }
+}

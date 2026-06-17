@@ -113,9 +113,18 @@ struct TranslatorWindow: View {
 
             Spacer()
 
-            Text("Requires Screen & System Audio Recording permission.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    viewModel.openPrivacySettings()
+                } label: {
+                    Label("Open Privacy Settings", systemImage: "lock.shield")
+                }
+                .buttonStyle(.bordered)
+
+                Text("Allow Screen & System Audio Recording for this app.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(20)
     }

@@ -1,6 +1,7 @@
 .DS_Store
 .build/
 .swiftpm/
+dist/
 
 # Local whisper.cpp build artifacts
 vendor/whisper.cpp/build/
