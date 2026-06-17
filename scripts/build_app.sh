@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="${APP_NAME:-GameChatTranslator}"
 PRODUCT_NAME="GameChatTranslatorApp"
-HELPER_NAME="SystemAudioTranscriber"
 BUNDLE_ID="${BUNDLE_ID:-dev.pfrommer.gamechattranslator}"
 APP_VERSION="${APP_VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
@@ -39,13 +38,11 @@ cmake --build "$WHISPER_BUILD_DIR" --config Release
 
 echo "Building Swift release binaries..."
 MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" swift build -c "$CONFIGURATION" --product "$PRODUCT_NAME" --package-path "$ROOT_DIR"
-MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" swift build -c "$CONFIGURATION" --product "$HELPER_NAME" --package-path "$ROOT_DIR"
 
 BUILD_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path --package-path "$ROOT_DIR")"
 APP_BINARY="$BUILD_DIR/$PRODUCT_NAME"
-HELPER_BINARY="$BUILD_DIR/$HELPER_NAME"
 
-if [[ ! -x "$APP_BINARY" || ! -x "$HELPER_BINARY" ]]; then
+if [[ ! -x "$APP_BINARY" ]]; then
   echo "Expected release binaries were not produced."
   exit 1
 fi
@@ -55,8 +52,7 @@ rm -rf "$APP_PATH" "$ZIP_PATH"
 mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 
 ditto "$APP_BINARY" "$MACOS_DIR/$APP_NAME"
-ditto "$HELPER_BINARY" "$MACOS_DIR/$HELPER_NAME"
-chmod 755 "$MACOS_DIR/$APP_NAME" "$MACOS_DIR/$HELPER_NAME"
+chmod 755 "$MACOS_DIR/$APP_NAME"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -132,17 +128,13 @@ else
   echo "No model bundled. Users can choose a local ggml model in the app."
 fi
 
-if ! otool -l "$MACOS_DIR/$HELPER_NAME" | grep -q "@executable_path/../Frameworks"; then
-  install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$HELPER_NAME"
-fi
-
 for dev_rpath in \
   "@executable_path/../../../vendor/whisper.cpp/build/src" \
   "@executable_path/../../../vendor/whisper.cpp/build/ggml/src" \
   "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-blas" \
   "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-metal"
 do
-  install_name_tool -delete_rpath "$dev_rpath" "$MACOS_DIR/$HELPER_NAME" 2>/dev/null || true
+  install_name_tool -delete_rpath "$dev_rpath" "$MACOS_DIR/$APP_NAME" 2>/dev/null || true
 done
 
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "$DEPLOYMENT_TARGET")"
@@ -155,21 +147,18 @@ set_build_version() {
 }
 
 set_build_version "$MACOS_DIR/$APP_NAME"
-set_build_version "$MACOS_DIR/$HELPER_NAME"
 
 echo "Signing app bundle..."
 if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
   find "$FRAMEWORKS_DIR" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' dylib; do
     codesign --force --sign - "$dylib"
   done
-  codesign --force --sign - "$MACOS_DIR/$HELPER_NAME"
   codesign --force --sign - "$MACOS_DIR/$APP_NAME"
   codesign --force --sign - "$APP_PATH"
 else
   find "$FRAMEWORKS_DIR" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' dylib; do
     codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$dylib"
   done
-  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$HELPER_NAME"
   codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$MACOS_DIR/$APP_NAME"
   codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$APP_PATH"
 fi

@@ -1,24 +1,24 @@
 import Foundation
 
-final class AudioRingBuffer {
+public final class AudioRingBuffer {
     private let sampleRate: Int
     private let capacity: Int
     private var samples: [Float] = []
     private let lock = NSLock()
 
-    init(sampleRate: Int = 16_000, maxDurationSeconds: Double = 15) {
+    public init(sampleRate: Int = 16_000, maxDurationSeconds: Double = 15) {
         self.sampleRate = sampleRate
         self.capacity = max(1, Int(maxDurationSeconds * Double(sampleRate)))
         self.samples.reserveCapacity(self.capacity)
     }
 
-    var durationSeconds: Double {
+    public var durationSeconds: Double {
         lock.withLock {
             Double(samples.count) / Double(sampleRate)
         }
     }
 
-    func append(_ newSamples: [Float]) {
+    public func append(_ newSamples: [Float]) {
         guard !newSamples.isEmpty else { return }
 
         lock.withLock {
@@ -27,7 +27,7 @@ final class AudioRingBuffer {
         }
     }
 
-    func readLast(seconds: Double) -> [Float] {
+    public func readLast(seconds: Double) -> [Float] {
         lock.withLock {
             let count = min(samples.count, Int(seconds * Double(sampleRate)))
             guard count > 0 else { return [] }
@@ -35,7 +35,7 @@ final class AudioRingBuffer {
         }
     }
 
-    func popChunk(seconds: Double, keepingOverlap overlapSeconds: Double = 0) -> [Float] {
+    public func popChunk(seconds: Double, keepingOverlap overlapSeconds: Double = 0) -> [Float] {
         lock.withLock {
             let requested = Int(seconds * Double(sampleRate))
             guard samples.count >= requested else { return [] }
@@ -51,7 +51,7 @@ final class AudioRingBuffer {
         }
     }
 
-    func clearOldSamples() {
+    public func clearOldSamples() {
         lock.withLock {
             clearOldSamplesLocked()
         }
@@ -71,4 +71,3 @@ private extension NSLock {
         return try body()
     }
 }
-

@@ -2,14 +2,14 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-enum PCMConverterError: Error, LocalizedError {
+public enum PCMConverterError: Error, LocalizedError {
     case missingFormatDescription
     case unsupportedFormat
     case blockBufferUnavailable(OSStatus)
     case converterCreationFailed
     case conversionFailed(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .missingFormatDescription:
             return "Audio sample buffer did not include a format description."
@@ -25,18 +25,18 @@ enum PCMConverterError: Error, LocalizedError {
     }
 }
 
-final class PCMConverter {
+public final class PCMConverter {
     private let targetSampleRate: Double
     private let targetChannels: AVAudioChannelCount
     private var converter: AVAudioConverter?
     private var sourceFormat: AVAudioFormat?
 
-    init(targetSampleRate: Double = 16_000, targetChannels: AVAudioChannelCount = 1) {
+    public init(targetSampleRate: Double = 16_000, targetChannels: AVAudioChannelCount = 1) {
         self.targetSampleRate = targetSampleRate
         self.targetChannels = targetChannels
     }
 
-    func convert(_ sampleBuffer: CMSampleBuffer) throws -> [Float] {
+    public func convert(_ sampleBuffer: CMSampleBuffer) throws -> [Float] {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               var streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee else {
             throw PCMConverterError.missingFormatDescription

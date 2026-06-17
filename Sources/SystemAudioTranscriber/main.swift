@@ -1,5 +1,6 @@
 import CoreMedia
 import Foundation
+import GameChatTranslatorCore
 
 struct AppConfiguration {
     let modelPath: String?

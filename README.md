@@ -89,7 +89,7 @@ swift run GameChatTranslatorApp
 
 The GUI lets you choose a model, select a preset, start/stop translation, open macOS privacy settings, and copy or clear the live transcript.
 
-In development it launches the translator through SwiftPM. In a packaged `.app`, it launches the bundled `SystemAudioTranscriber` helper directly.
+The packaged `.app` runs capture and transcription in-process. There is no separate audio-capture helper executable, so macOS only needs Screen & System Audio Recording permission for `GameChatTranslator.app` itself.
 
 ## Build A Release App
 

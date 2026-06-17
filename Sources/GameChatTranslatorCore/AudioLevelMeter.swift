@@ -1,12 +1,12 @@
 import Foundation
 
-struct AudioLevel {
-    let rms: Float
-    let dbFS: Float
+public struct AudioLevel {
+    public let rms: Float
+    public let dbFS: Float
 }
 
-enum AudioLevelMeter {
-    static func measure(_ samples: [Float]) -> AudioLevel {
+public enum AudioLevelMeter {
+    public static func measure(_ samples: [Float]) -> AudioLevel {
         guard !samples.isEmpty else {
             return AudioLevel(rms: 0, dbFS: -120)
         }
@@ -21,4 +21,3 @@ enum AudioLevelMeter {
         return AudioLevel(rms: rms, dbFS: 20 * log10(clamped))
     }
 }
-

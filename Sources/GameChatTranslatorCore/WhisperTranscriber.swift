@@ -1,20 +1,20 @@
 import CWhisperBridge
 import Foundation
 
-struct TranscriptResult {
-    let text: String
-    let detectedLanguage: String?
-    let durationSeconds: Double
-    let averageTokenProbability: Float
-    let tokenCount: Int
+public struct TranscriptResult {
+    public let text: String
+    public let detectedLanguage: String?
+    public let durationSeconds: Double
+    public let averageTokenProbability: Float
+    public let tokenCount: Int
 }
 
-enum WhisperTranscriberError: Error, LocalizedError {
+public enum WhisperTranscriberError: Error, LocalizedError {
     case modelNotFound(String)
     case failedToLoadModel(String)
     case unsupportedSampleRate(Int)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .modelNotFound(let path):
             return "Whisper model not found at \(path)."
@@ -26,10 +26,10 @@ enum WhisperTranscriberError: Error, LocalizedError {
     }
 }
 
-final class WhisperTranscriber {
+public final class WhisperTranscriber {
     private let bridge: OpaquePointer
 
-    init(
+    public init(
         modelPath: String,
         language: String = "auto",
         translateToEnglish: Bool = false,
@@ -55,7 +55,7 @@ final class WhisperTranscriber {
         whisper_bridge_free(bridge)
     }
 
-    func transcribe(samples: [Float], sampleRate: Int) async throws -> TranscriptResult {
+    public func transcribe(samples: [Float], sampleRate: Int) async throws -> TranscriptResult {
         guard sampleRate == 16_000 else {
             throw WhisperTranscriberError.unsupportedSampleRate(sampleRate)
         }

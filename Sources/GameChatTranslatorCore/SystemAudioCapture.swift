@@ -2,12 +2,12 @@ import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
-enum SystemAudioCaptureError: Error, LocalizedError {
+public enum SystemAudioCaptureError: Error, LocalizedError {
     case noDisplayFound
     case failedToAddOutput(Error)
     case failedToStart(Error)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .noDisplayFound:
             return "No display was found for ScreenCaptureKit capture."
@@ -26,19 +26,19 @@ enum SystemAudioCaptureError: Error, LocalizedError {
     }
 }
 
-final class SystemAudioCapture: NSObject, SCStreamOutput {
-    typealias AudioHandler = (CMSampleBuffer) -> Void
+public final class SystemAudioCapture: NSObject, SCStreamOutput {
+    public typealias AudioHandler = (CMSampleBuffer) -> Void
 
     private let queue = DispatchQueue(label: "SystemAudioTranscriber.ScreenCaptureKitAudio")
     private let onAudio: AudioHandler
     private var stream: SCStream?
 
-    init(onAudio: @escaping AudioHandler) {
+    public init(onAudio: @escaping AudioHandler) {
         self.onAudio = onAudio
         super.init()
     }
 
-    func start() async throws {
+    public func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else {
             throw SystemAudioCaptureError.noDisplayFound
@@ -73,13 +73,13 @@ final class SystemAudioCapture: NSObject, SCStreamOutput {
         self.stream = stream
     }
 
-    func stop() async {
+    public func stop() async {
         guard let stream else { return }
         try? await stream.stopCapture()
         self.stream = nil
     }
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, sampleBuffer.isValid else { return }
         onAudio(sampleBuffer)
     }

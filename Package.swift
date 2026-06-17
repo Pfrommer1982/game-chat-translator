@@ -14,13 +14,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "SystemAudioTranscriber",
-            dependencies: ["CWhisperBridge"],
+            dependencies: ["GameChatTranslatorCore"],
             linkerSettings: [
-                .linkedFramework("ScreenCaptureKit"),
-                .linkedFramework("AVFoundation"),
-                .linkedFramework("CoreMedia"),
-                .linkedFramework("CoreAudio"),
-                .linkedFramework("Accelerate"),
                 .unsafeFlags([
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/src",
@@ -28,6 +23,17 @@ let package = Package(
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-blas",
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-metal"
                 ])
+            ]
+        ),
+        .target(
+            name: "GameChatTranslatorCore",
+            dependencies: ["CWhisperBridge"],
+            linkerSettings: [
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("Accelerate")
             ]
         ),
         .target(
@@ -49,9 +55,17 @@ let package = Package(
         ),
         .executableTarget(
             name: "GameChatTranslatorApp",
+            dependencies: ["GameChatTranslatorCore"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("SwiftUI")
+                .linkedFramework("SwiftUI"),
+                .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/src",
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src",
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-blas",
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../vendor/whisper.cpp/build/ggml/src/ggml-metal"
+                ])
             ]
         )
     ]

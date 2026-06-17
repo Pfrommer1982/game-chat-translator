@@ -1,6 +1,6 @@
 import Foundation
 
-final class TranscriptionScheduler {
+public final class TranscriptionScheduler {
     private let ringBuffer: AudioRingBuffer
     private let transcriber: WhisperTranscriber?
     private let chunkSeconds: Double
@@ -11,6 +11,7 @@ final class TranscriptionScheduler {
     private let utteranceEndSilenceSeconds: Double
     private let utteranceMaxSeconds: Double
     private let verbose: Bool
+    private let onOutput: @Sendable (String) -> Void
     private var isRunning = false
     private var isTranscribing = false
     private var recentNormalizedOutputs: [String] = []
@@ -29,7 +30,7 @@ final class TranscriptionScheduler {
         realtimeUtteranceMode ? 0.2 : max(0.5, chunkSeconds - overlapSeconds)
     }
 
-    init(
+    public init(
         ringBuffer: AudioRingBuffer,
         transcriber: WhisperTranscriber?,
         chunkSeconds: Double = 5,
@@ -39,7 +40,8 @@ final class TranscriptionScheduler {
         realtimeUtteranceMode: Bool = false,
         utteranceEndSilenceSeconds: Double = 0.55,
         utteranceMaxSeconds: Double = 6.0,
-        verbose: Bool = false
+        verbose: Bool = false,
+        onOutput: @escaping @Sendable (String) -> Void = { print($0) }
     ) {
         self.ringBuffer = ringBuffer
         self.transcriber = transcriber
@@ -51,9 +53,10 @@ final class TranscriptionScheduler {
         self.utteranceEndSilenceSeconds = utteranceEndSilenceSeconds
         self.utteranceMaxSeconds = utteranceMaxSeconds
         self.verbose = verbose
+        self.onOutput = onOutput
     }
 
-    func start() {
+    public func start() {
         guard transcriber != nil else { return }
         isRunning = true
 
@@ -66,7 +69,7 @@ final class TranscriptionScheduler {
         }
     }
 
-    func stop() {
+    public func stop() {
         isRunning = false
     }
 
@@ -79,7 +82,7 @@ final class TranscriptionScheduler {
         }
 
         if isTranscribing {
-            print("Skipping chunk because transcription is still running.")
+            emit("Skipping chunk because transcription is still running.")
             return
         }
 
@@ -94,7 +97,7 @@ final class TranscriptionScheduler {
 
         guard freshLevel.rms >= silenceThresholdRMS else {
             if verbose {
-                print(String(format: "Skipping stale overlap: fresh rms %.6f, %.1f dBFS, threshold %.6f", freshLevel.rms, freshLevel.dbFS, silenceThresholdRMS))
+                emit(String(format: "Skipping stale overlap: fresh rms %.6f, %.1f dBFS, threshold %.6f", freshLevel.rms, freshLevel.dbFS, silenceThresholdRMS))
             }
             flushPendingOutputIfUseful(force: true)
             return
@@ -107,7 +110,7 @@ final class TranscriptionScheduler {
         )
         guard voiceActivity.hasLikelySpeech else {
             if verbose {
-                print(String(
+                emit(String(
                     format: "Skipping non-dialogue audio: speech frames %d/%d, ratio %.2f, fresh rms %.6f",
                     voiceActivity.speechFrameCount,
                     voiceActivity.totalFrameCount,
@@ -121,7 +124,7 @@ final class TranscriptionScheduler {
 
         guard level.rms >= silenceThresholdRMS else {
             if verbose {
-                print(String(format: "Skipping silent chunk: rms %.6f, %.1f dBFS, threshold %.6f", level.rms, level.dbFS, silenceThresholdRMS))
+                emit(String(format: "Skipping silent chunk: rms %.6f, %.1f dBFS, threshold %.6f", level.rms, level.dbFS, silenceThresholdRMS))
             }
             flushPendingOutputIfUseful(force: true)
             return
@@ -132,19 +135,19 @@ final class TranscriptionScheduler {
 
         do {
             if verbose {
-                print(String(format: "Transcribing %.1fs chunk: rms %.6f, %.1f dBFS", chunkSeconds, level.rms, level.dbFS))
+                emit(String(format: "Transcribing %.1fs chunk: rms %.6f, %.1f dBFS", chunkSeconds, level.rms, level.dbFS))
             }
             let result = try await transcriber.transcribe(samples: chunk, sampleRate: sampleRate)
             guard !result.text.isEmpty else {
                 if verbose {
                     let language = result.detectedLanguage ?? "unknown"
-                    print("[detected: \(language)] no speech text returned")
+                    emit("[detected: \(language)] no speech text returned")
                 }
                 return
             }
             guard result.tokenCount == 0 || result.averageTokenProbability >= 0.38 else {
                 if verbose {
-                    print(String(format: "Skipping low-confidence transcript: p %.2f, tokens %d, text: %@", result.averageTokenProbability, result.tokenCount, result.text))
+                    emit(String(format: "Skipping low-confidence transcript: p %.2f, tokens %d, text: %@", result.averageTokenProbability, result.tokenCount, result.text))
                 }
                 return
             }
@@ -152,7 +155,7 @@ final class TranscriptionScheduler {
             let outputText = removeAlreadyPrintedPrefix(from: cleanedText)
             guard !outputText.isEmpty else {
                 if verbose {
-                    print("Skipping fully overlapped transcript: \(result.text)")
+                    emit("Skipping fully overlapped transcript: \(result.text)")
                 }
                 return
             }
@@ -162,25 +165,25 @@ final class TranscriptionScheduler {
             if let language = result.detectedLanguage,
                isLikelyBadLanguageDetection(language) {
                 if verbose {
-                    print("Skipping unlikely detected language \(language): \(outputText)")
+                    emit("Skipping unlikely detected language \(language): \(outputText)")
                 }
                 return
             }
             guard !looksLikeDecoderPromptEcho(normalized) else {
                 if verbose {
-                    print("Skipping decoder prompt echo: \(result.text)")
+                    emit("Skipping decoder prompt echo: \(result.text)")
                 }
                 return
             }
             guard !looksLikeCommonSilenceHallucination(normalized) else {
                 if verbose {
-                    print("Skipping common silence hallucination: \(result.text)")
+                    emit("Skipping common silence hallucination: \(result.text)")
                 }
                 return
             }
             if recentNormalizedOutputs.contains(normalized) {
                 if verbose {
-                    print("Skipping repeated transcript: \(outputText)")
+                    emit("Skipping repeated transcript: \(outputText)")
                 }
                 return
             }
@@ -190,7 +193,7 @@ final class TranscriptionScheduler {
             }
             bufferOutput(outputText, language: result.detectedLanguage)
         } catch {
-            print("Transcription failed: \(error.localizedDescription)")
+            emit("Transcription failed: \(error.localizedDescription)")
         }
     }
 
@@ -222,7 +225,7 @@ final class TranscriptionScheduler {
 
             guard isCapturingUtterance else {
                 if verbose {
-                    print(String(format: "Waiting for speech: rms %.6f, speech frames %d/%d", level.rms, voiceActivity.speechFrameCount, voiceActivity.totalFrameCount))
+                    emit(String(format: "Waiting for speech: rms %.6f, speech frames %d/%d", level.rms, voiceActivity.speechFrameCount, voiceActivity.totalFrameCount))
                 }
                 return
             }
@@ -258,7 +261,7 @@ final class TranscriptionScheduler {
 
         guard duration >= 0.55 else {
             if verbose {
-                print(String(format: "Skipping too-short utterance %.2fs", duration))
+                emit(String(format: "Skipping too-short utterance %.2fs", duration))
             }
             return
         }
@@ -266,13 +269,13 @@ final class TranscriptionScheduler {
         let level = AudioLevelMeter.measure(samples)
         guard level.rms >= silenceThresholdRMS else {
             if verbose {
-                print(String(format: "Skipping quiet utterance %.2fs: rms %.6f", duration, level.rms))
+                emit(String(format: "Skipping quiet utterance %.2fs: rms %.6f", duration, level.rms))
             }
             return
         }
 
         if verbose {
-            print(String(format: "Queueing utterance %.2fs (%@): rms %.6f, %.1f dBFS", duration, reason, level.rms, level.dbFS))
+            emit(String(format: "Queueing utterance %.2fs (%@): rms %.6f, %.1f dBFS", duration, reason, level.rms, level.dbFS))
         }
 
         enqueueUtterance(samples)
@@ -317,7 +320,7 @@ final class TranscriptionScheduler {
             let result = try await transcriber.transcribe(samples: samples, sampleRate: sampleRate)
             handleTranscriptResult(result)
         } catch {
-            print("Transcription failed: \(error.localizedDescription)")
+            emit("Transcription failed: \(error.localizedDescription)")
         }
     }
 
@@ -325,14 +328,14 @@ final class TranscriptionScheduler {
         guard !result.text.isEmpty else {
             if verbose {
                 let language = result.detectedLanguage ?? "unknown"
-                print("[detected: \(language)] no speech text returned")
+                emit("[detected: \(language)] no speech text returned")
             }
             return
         }
 
         guard result.tokenCount == 0 || result.averageTokenProbability >= 0.38 else {
             if verbose {
-                print(String(format: "Skipping low-confidence transcript: p %.2f, tokens %d, text: %@", result.averageTokenProbability, result.tokenCount, result.text))
+                emit(String(format: "Skipping low-confidence transcript: p %.2f, tokens %d, text: %@", result.averageTokenProbability, result.tokenCount, result.text))
             }
             return
         }
@@ -344,7 +347,7 @@ final class TranscriptionScheduler {
         if let language = result.detectedLanguage,
            isLikelyBadLanguageDetection(language) {
             if verbose {
-                print("Skipping unlikely detected language \(language): \(outputText)")
+                emit("Skipping unlikely detected language \(language): \(outputText)")
             }
             return
         }
@@ -352,7 +355,7 @@ final class TranscriptionScheduler {
         guard !looksLikeCommonSilenceHallucination(normalized) else { return }
         if recentNormalizedOutputs.contains(normalized) {
             if verbose {
-                print("Skipping repeated transcript: \(outputText)")
+                emit("Skipping repeated transcript: \(outputText)")
             }
             return
         }
@@ -364,7 +367,7 @@ final class TranscriptionScheduler {
         rememberPrintedWords(outputText)
 
         let language = result.detectedLanguage ?? "unknown"
-        print("[detected: \(language)] \(outputText)")
+        emit("[detected: \(language)] \(outputText)")
     }
 
     private func normalizeForRepeatDetection(_ text: String) -> String {
@@ -564,10 +567,14 @@ final class TranscriptionScheduler {
         guard shouldFlush else { return }
 
         let language = pendingLanguage ?? "unknown"
-        print("[detected: \(language)] \(trimmed)")
+        emit("[detected: \(language)] \(trimmed)")
         rememberPrintedWords(trimmed)
         pendingOutput = ""
         pendingLanguage = nil
+    }
+
+    private func emit(_ line: String) {
+        onOutput(line)
     }
 
     private func needsLeadingSpace(before text: String) -> Bool {

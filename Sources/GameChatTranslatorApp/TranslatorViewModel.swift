@@ -1,5 +1,7 @@
 import AppKit
+import CoreMedia
 import Foundation
+import GameChatTranslatorCore
 
 @MainActor
 final class TranslatorViewModel: ObservableObject {
@@ -29,9 +31,12 @@ final class TranslatorViewModel: ObservableObject {
     @Published private(set) var statusText = "Ready"
     @Published private(set) var transcriptLines: [String] = []
 
-    private var process: Process?
-    private var stdoutPipe: Pipe?
-    private var stderrPipe: Pipe?
+    private var capture: SystemAudioCapture?
+    private var scheduler: TranscriptionScheduler?
+    private var transcriber: WhisperTranscriber?
+    private var converter: PCMConverter?
+    private var ringBuffer: AudioRingBuffer?
+    private var startTask: Task<Void, Never>?
 
     init() {
         let defaults = UserDefaults.standard
@@ -92,73 +97,50 @@ final class TranslatorViewModel: ObservableObject {
     func start() {
         guard canStart else { return }
 
-        let command: LaunchCommand
+        let model: String
         do {
-            command = try makeLaunchCommand()
+            model = try resolvedModelPath()
         } catch {
             statusText = "Configuration error"
             appendLine("Error: \(error.localizedDescription)")
             return
         }
 
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
+        transcriptLines.removeAll()
+        isRunning = true
+        statusText = "Starting..."
+        appendLine("Starting translation engine...")
 
-        process.executableURL = command.executableURL
-        process.arguments = command.arguments
-        process.currentDirectoryURL = command.currentDirectoryURL
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        let settings = EngineSettings(
+            modelPath: model,
+            sourceLanguage: sourceLanguage,
+            threads: threads,
+            silenceThreshold: Float(silenceThreshold),
+            preset: preset
+        )
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.appendOutput(text) }
-        }
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.appendStatusOutput(text) }
-        }
-
-        process.terminationHandler = { [weak self] process in
-            Task { @MainActor in
-                self?.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-                self?.stderrPipe?.fileHandleForReading.readabilityHandler = nil
-                self?.isRunning = false
-                if process.terminationStatus == 0 {
-                    self?.statusText = "Stopped"
-                } else {
-                    self?.statusText = "Stopped with error"
-                    self?.appendLine("Engine stopped with exit code \(process.terminationStatus).")
-                }
-                self?.process = nil
-            }
-        }
-
-        do {
-            transcriptLines.removeAll()
-            statusText = "Starting..."
-            appendLine("Starting translation engine...")
-            self.process = process
-            self.stdoutPipe = stdoutPipe
-            self.stderrPipe = stderrPipe
-            try process.run()
-            isRunning = true
-            statusText = command.isBundledHelper ? "Listening" : "Listening (dev)"
-        } catch {
-            statusText = "Could not start translator"
-            appendLine("Error: \(error.localizedDescription)")
-            self.process = nil
+        startTask?.cancel()
+        startTask = Task { [weak self] in
+            await self?.startEngine(settings)
         }
     }
 
     func stop() {
-        guard let process else { return }
+        guard isRunning || startTask != nil else { return }
         statusText = "Stopping..."
-        process.terminate()
+        startTask?.cancel()
+        scheduler?.stop()
+
+        let activeCapture = capture
+        clearEngineReferences(keepTranscriber: false)
+
+        Task { [weak self] in
+            await activeCapture?.stop()
+            await MainActor.run {
+                self?.isRunning = false
+                self?.statusText = "Stopped"
+            }
+        }
     }
 
     func clearTranscript() {
@@ -171,52 +153,100 @@ final class TranslatorViewModel: ObservableObject {
         pasteboard.setString(transcriptLines.joined(separator: "\n"), forType: .string)
     }
 
-    private func makeLaunchCommand() throws -> LaunchCommand {
-        let model = try resolvedModelPath()
-        let translatorArgs = commandArguments(modelPath: model)
+    private func startEngine(_ settings: EngineSettings) async {
+        do {
+            statusText = "Loading model"
+            appendLine("Loading whisper model: \(settings.modelPath)")
 
-        if let helperURL = bundledHelperURL(),
-           FileManager.default.isExecutableFile(atPath: helperURL.path) {
-            return LaunchCommand(
-                executableURL: helperURL,
-                arguments: translatorArgs,
-                currentDirectoryURL: Bundle.main.resourceURL,
-                isBundledHelper: true
+            let loadedTranscriber = try await Task.detached(priority: .userInitiated) {
+                try WhisperTranscriber(
+                    modelPath: settings.modelPath,
+                    language: settings.sourceLanguage,
+                    translateToEnglish: true,
+                    realtimeMode: true,
+                    threadCount: settings.threads
+                )
+            }.value
+
+            if Task.isCancelled {
+                isRunning = false
+                statusText = "Stopped"
+                return
+            }
+
+            let sampleRate = 16_000
+            let ringBuffer = AudioRingBuffer(sampleRate: sampleRate, maxDurationSeconds: 20)
+            let converter = PCMConverter(targetSampleRate: Double(sampleRate), targetChannels: 1)
+            let scheduler = TranscriptionScheduler(
+                ringBuffer: ringBuffer,
+                transcriber: loadedTranscriber,
+                chunkSeconds: 2.0,
+                overlapSeconds: 1.7,
+                sampleRate: sampleRate,
+                silenceThresholdRMS: settings.silenceThreshold,
+                realtimeUtteranceMode: true,
+                utteranceEndSilenceSeconds: settings.utteranceEndSilenceSeconds,
+                utteranceMaxSeconds: settings.utteranceMaxSeconds,
+                verbose: false,
+                onOutput: { [weak self] line in
+                    Task { @MainActor in
+                        self?.appendLine(line)
+                    }
+                }
             )
-        }
 
-        return LaunchCommand(
-            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["swift", "run", "SystemAudioTranscriber"] + translatorArgs,
-            currentDirectoryURL: URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
-            isBundledHelper: false
-        )
+            let capture = SystemAudioCapture { [weak self, converter, ringBuffer] sampleBuffer in
+                do {
+                    let samples = try converter.convert(sampleBuffer)
+                    ringBuffer.append(samples)
+                } catch {
+                    Task { @MainActor in
+                        self?.appendLine("PCM conversion skipped buffer: \(error.localizedDescription)")
+                    }
+                }
+            }
+
+            self.transcriber = loadedTranscriber
+            self.ringBuffer = ringBuffer
+            self.converter = converter
+            self.scheduler = scheduler
+            self.capture = capture
+
+            statusText = "Starting capture"
+            appendLine("Model loaded.")
+
+            try await capture.start()
+
+            if Task.isCancelled {
+                await capture.stop()
+                isRunning = false
+                statusText = "Stopped"
+                clearEngineReferences(keepTranscriber: false)
+                return
+            }
+
+            scheduler.start()
+            statusText = "Listening"
+            appendLine("Listening to system audio...")
+            appendLine("Audio: 16000 Hz mono Float32")
+            appendLine("Buffer: realtime")
+        } catch {
+            statusText = "Stopped with error"
+            appendLine(error.localizedDescription)
+            isRunning = false
+            clearEngineReferences(keepTranscriber: false)
+        }
     }
 
-    private func commandArguments(modelPath: String) -> [String] {
-        var args = [
-            "--model", modelPath,
-            "--language", sourceLanguage,
-            "--translate-to", "en",
-            "--realtime",
-            "--threads", "\(threads)",
-            "--silence-threshold", String(format: "%.4f", silenceThreshold)
-        ]
-
-        switch preset {
-        case .gameChat:
-            args += [
-                "--utterance-end-silence", "0.45",
-                "--utterance-max-seconds", "5"
-            ]
-        case .quality:
-            args += [
-                "--utterance-end-silence", "0.75",
-                "--utterance-max-seconds", "9"
-            ]
+    private func clearEngineReferences(keepTranscriber: Bool) {
+        scheduler = nil
+        capture = nil
+        converter = nil
+        ringBuffer = nil
+        startTask = nil
+        if !keepTranscriber {
+            transcriber = nil
         }
-
-        return args
     }
 
     private func resolvedModelPath() throws -> String {
@@ -320,44 +350,6 @@ final class TranslatorViewModel: ObservableObject {
         path == "./models/ggml-small.bin" || path == "models/ggml-small.bin"
     }
 
-    private func bundledHelperURL() -> URL? {
-        guard Bundle.main.bundleURL.pathExtension == "app" else {
-            return nil
-        }
-        return Bundle.main.bundleURL
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("MacOS")
-            .appendingPathComponent("SystemAudioTranscriber")
-    }
-
-    private func appendOutput(_ text: String) {
-        text
-            .split(whereSeparator: \.isNewline)
-            .map(String.init)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .forEach { appendLine($0) }
-    }
-
-    private func appendStatusOutput(_ text: String) {
-        for line in text.split(whereSeparator: \.isNewline).map(String.init) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-
-            if trimmed.contains("Loading whisper model") {
-                statusText = "Loading model"
-                appendLine(trimmed)
-            } else if trimmed.contains("Model loaded") {
-                statusText = "Listening"
-                appendLine(trimmed)
-            } else if trimmed.contains("Screen & System Audio Recording") {
-                statusText = "Permission needed"
-                appendLine(trimmed)
-            } else {
-                appendLine(trimmed)
-            }
-        }
-    }
-
     private func appendLine(_ line: String) {
         transcriptLines.append(line)
         if transcriptLines.count > 500 {
@@ -366,11 +358,26 @@ final class TranslatorViewModel: ObservableObject {
     }
 }
 
-private struct LaunchCommand {
-    let executableURL: URL
-    let arguments: [String]
-    let currentDirectoryURL: URL?
-    let isBundledHelper: Bool
+private struct EngineSettings {
+    let modelPath: String
+    let sourceLanguage: String
+    let threads: Int
+    let silenceThreshold: Float
+    let preset: TranslatorViewModel.Preset
+
+    var utteranceEndSilenceSeconds: Double {
+        switch preset {
+        case .gameChat: 0.45
+        case .quality: 0.75
+        }
+    }
+
+    var utteranceMaxSeconds: Double {
+        switch preset {
+        case .gameChat: 5
+        case .quality: 9
+        }
+    }
 }
 
 private enum ViewModelError: LocalizedError {
