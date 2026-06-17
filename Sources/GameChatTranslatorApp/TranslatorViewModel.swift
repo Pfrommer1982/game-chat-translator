@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 import Foundation
 
 @MainActor
@@ -76,10 +75,6 @@ final class TranslatorViewModel: ObservableObject {
 
     func start() {
         guard canStart else { return }
-
-        guard ensureScreenRecordingPermission() else {
-            return
-        }
 
         let command: LaunchCommand
         do {
@@ -158,24 +153,6 @@ final class TranslatorViewModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(transcriptLines.joined(separator: "\n"), forType: .string)
-    }
-
-    private func ensureScreenRecordingPermission() -> Bool {
-        if CGPreflightScreenCaptureAccess() {
-            return true
-        }
-
-        statusText = "Permission needed"
-        appendLine("macOS needs Screen & System Audio Recording permission before system audio can be captured.")
-        appendLine("A permission prompt may appear. If it does not, click Open Privacy Settings and enable Game Chat Translator, then quit and reopen the app.")
-
-        let granted = CGRequestScreenCaptureAccess()
-        if !granted {
-            appendLine("Permission is not active yet. Enable it in System Settings, then quit and reopen Game Chat Translator.")
-            return false
-        }
-
-        return true
     }
 
     private func makeLaunchCommand() throws -> LaunchCommand {

@@ -51,7 +51,6 @@ let package = Package(
             name: "GameChatTranslatorApp",
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("CoreGraphics"),
                 .linkedFramework("SwiftUI")
             ]
         )
