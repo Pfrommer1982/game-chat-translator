@@ -1,0 +1,14 @@
+.DS_Store
+.build/
+.swiftpm/
+
+# Local whisper.cpp build artifacts
+vendor/whisper.cpp/build/
+
+# Model files are downloaded by users locally.
+models/*.bin
+models/*.gguf
+
+# Local env/secrets
+.env
+*.local
