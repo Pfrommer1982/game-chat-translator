@@ -104,7 +104,7 @@ WhisperBridgeResult whisper_bridge_transcribe(
     int sample_count,
     int sample_rate
 ) {
-    WhisperBridgeResult result = { nullptr, nullptr, 0.0f, 0 };
+    WhisperBridgeResult result = { nullptr, nullptr, 0.0f, 0.0f, 0 };
     if (!bridge || !bridge->ctx || !samples || sample_count <= 0 || sample_rate != 16000) {
         result.text = copy_string("");
         result.language = copy_string("");
@@ -113,14 +113,17 @@ WhisperBridgeResult whisper_bridge_transcribe(
 
     std::lock_guard<std::mutex> lock(bridge->mutex);
 
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
+    const whisper_sampling_strategy strategy = bridge->realtime_mode
+        ? WHISPER_SAMPLING_GREEDY
+        : WHISPER_SAMPLING_BEAM_SEARCH;
+    whisper_full_params params = whisper_full_default_params(strategy);
     params.print_realtime = false;
     params.print_progress = false;
     params.print_timestamps = false;
     params.print_special = false;
     params.translate = bridge->translate_to_english;
-    params.no_context = bridge->translate_to_english;
-    params.single_segment = bridge->translate_to_english;
+    params.no_context = bridge->translate_to_english || bridge->realtime_mode;
+    params.single_segment = bridge->translate_to_english || bridge->realtime_mode;
     params.language = bridge->language == "auto" ? nullptr : bridge->language.c_str();
     params.detect_language = false;
     params.n_threads = bridge->thread_count;
@@ -131,10 +134,10 @@ WhisperBridgeResult whisper_bridge_transcribe(
     params.suppress_blank = true;
     params.suppress_nst = true;
     if (bridge->realtime_mode) {
-        params.audio_ctx = 1024;
-        params.max_tokens = 36;
-        params.max_len = 140;
-        params.beam_search.beam_size = 3;
+        params.audio_ctx = 768;
+        params.max_tokens = 24;
+        params.max_len = 96;
+        params.greedy.best_of = 1;
     } else {
         params.beam_search.beam_size = 5;
     }
@@ -152,8 +155,13 @@ WhisperBridgeResult whisper_bridge_transcribe(
     std::string text;
     float token_probability_sum = 0.0f;
     int token_probability_count = 0;
+    float no_speech_probability = 0.0f;
     const int segments = whisper_full_n_segments(bridge->ctx);
     for (int i = 0; i < segments; ++i) {
+        no_speech_probability = std::max(
+            no_speech_probability,
+            whisper_full_get_segment_no_speech_prob(bridge->ctx, i)
+        );
         const char * segment = whisper_full_get_segment_text(bridge->ctx, i);
         if (segment) {
             text += segment;
@@ -178,6 +186,7 @@ WhisperBridgeResult whisper_bridge_transcribe(
     result.text = copy_string(text);
     result.language = copy_string(language);
     result.token_count = token_probability_count;
+    result.no_speech_probability = no_speech_probability;
     result.average_token_probability = token_probability_count > 0
         ? token_probability_sum / static_cast<float>(token_probability_count)
         : 0.0f;

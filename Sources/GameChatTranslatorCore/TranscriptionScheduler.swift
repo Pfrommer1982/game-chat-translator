@@ -2,7 +2,7 @@ import Foundation
 
 public final class TranscriptionScheduler {
     private let ringBuffer: AudioRingBuffer
-    private let transcriber: WhisperTranscriber?
+    private let transcriber: (any AudioTranscribing)?
     private let chunkSeconds: Double
     private let overlapSeconds: Double
     private let sampleRate: Int
@@ -10,8 +10,11 @@ public final class TranscriptionScheduler {
     private let realtimeUtteranceMode: Bool
     private let utteranceEndSilenceSeconds: Double
     private let utteranceMaxSeconds: Double
+    private let battleModeEnabled: Bool
+    private let targetLanguage: String?
+    private let partialTranscriptsEnabled: Bool
     private let verbose: Bool
-    private let onOutput: @Sendable (String) -> Void
+    private let onOutput: @Sendable (AttributedTranscript) -> Void
     private var isRunning = false
     private var isTranscribing = false
     private var recentNormalizedOutputs: [String] = []
@@ -21,18 +24,65 @@ public final class TranscriptionScheduler {
     private var isCapturingUtterance = false
     private var utteranceSamples: [Float] = []
     private var preRollSamples: [Float] = []
+    private var speechCandidateSamples: [Float] = []
     private var trailingSilenceSeconds = 0.0
     private let transcriptionQueueLock = NSLock()
-    private var queuedUtterances: [[Float]] = []
+
+    private struct Utterance {
+        let id: UInt64
+        let samples: [Float]
+        let startTime: Date
+        let endTime: Date
+        let voiceSampleTask: Task<VoiceSpeakerSample?, Never>?
+    }
+    private struct PendingPartialFinal {
+        let utterance: Utterance
+        let partialSampleCount: Int
+    }
+    private var queuedUtterances: [Utterance] = []
     private var isDrainingTranscriptionQueue = false
+    private var nextUtteranceID: UInt64 = 0
+    private var activeUtteranceID: UInt64 = 0
+    private var partialUtteranceID: UInt64?
+    private var partialSampleCount = 0
+    private var pendingPartialFinal: PendingPartialFinal?
+
+    public var speakerTracker: OCRSpeakerTracker?
+    public var enableSpeakerAttribution: Bool = false
+    public var activeProfile: GameProfile?
+    public var voiceSpeakerTracker: VoiceSpeakerTracker?
+
+    private var _lastAttributionResult: AttributionResult?
+    private var _lastSegmentStart: Date?
+    private var _lastSegmentEnd: Date?
+
+    public var lastAttributionResult: AttributionResult? {
+        transcriptionQueueLock.withLock { _lastAttributionResult }
+    }
+    public var lastSegmentStart: Date? {
+        transcriptionQueueLock.withLock { _lastSegmentStart }
+    }
+    public var lastSegmentEnd: Date? {
+        transcriptionQueueLock.withLock { _lastSegmentEnd }
+    }
+
+    private var pendingStartTime = Date()
+    private var pendingEndTime = Date()
+    private var utteranceStartTime = Date()
+    private var isPartialTranscribing = false
+    private var lastPartialRequestTime = Date.distantPast
+    private var lastPartialNormalized = ""
 
     private var stepSeconds: Double {
-        realtimeUtteranceMode ? 0.2 : max(0.5, chunkSeconds - overlapSeconds)
+        if realtimeUtteranceMode {
+            return battleModeEnabled ? 0.1 : 0.2
+        }
+        return max(0.5, chunkSeconds - overlapSeconds)
     }
 
     public init(
         ringBuffer: AudioRingBuffer,
-        transcriber: WhisperTranscriber?,
+        transcriber: (any AudioTranscribing)?,
         chunkSeconds: Double = 5,
         overlapSeconds: Double = 0.5,
         sampleRate: Int = 16_000,
@@ -40,8 +90,11 @@ public final class TranscriptionScheduler {
         realtimeUtteranceMode: Bool = false,
         utteranceEndSilenceSeconds: Double = 0.55,
         utteranceMaxSeconds: Double = 6.0,
+        battleModeEnabled: Bool = false,
+        targetLanguage: String? = nil,
+        partialTranscriptsEnabled: Bool = true,
         verbose: Bool = false,
-        onOutput: @escaping @Sendable (String) -> Void = { print($0) }
+        onOutput: @escaping @Sendable (AttributedTranscript) -> Void = { print($0.text) }
     ) {
         self.ringBuffer = ringBuffer
         self.transcriber = transcriber
@@ -52,6 +105,9 @@ public final class TranscriptionScheduler {
         self.realtimeUtteranceMode = realtimeUtteranceMode
         self.utteranceEndSilenceSeconds = utteranceEndSilenceSeconds
         self.utteranceMaxSeconds = utteranceMaxSeconds
+        self.battleModeEnabled = battleModeEnabled
+        self.targetLanguage = targetLanguage?.lowercased()
+        self.partialTranscriptsEnabled = partialTranscriptsEnabled
         self.verbose = verbose
         self.onOutput = onOutput
     }
@@ -85,6 +141,9 @@ public final class TranscriptionScheduler {
             emit("Skipping chunk because transcription is still running.")
             return
         }
+
+        let chunkEndTime = Date()
+        let chunkStartTime = chunkEndTime.addingTimeInterval(-chunkSeconds)
 
         let chunk = ringBuffer.popChunk(seconds: chunkSeconds, keepingOverlap: overlapSeconds)
         guard !chunk.isEmpty else { return }
@@ -162,13 +221,6 @@ public final class TranscriptionScheduler {
 
             let normalized = normalizeForRepeatDetection(outputText)
             guard !normalized.isEmpty else { return }
-            if let language = result.detectedLanguage,
-               isLikelyBadLanguageDetection(language) {
-                if verbose {
-                    emit("Skipping unlikely detected language \(language): \(outputText)")
-                }
-                return
-            }
             guard !looksLikeDecoderPromptEcho(normalized) else {
                 if verbose {
                     emit("Skipping decoder prompt echo: \(result.text)")
@@ -191,9 +243,9 @@ public final class TranscriptionScheduler {
             if recentNormalizedOutputs.count > 8 {
                 recentNormalizedOutputs.removeFirst(recentNormalizedOutputs.count - 8)
             }
-            bufferOutput(outputText, language: result.detectedLanguage)
+            bufferOutput(outputText, language: result.detectedLanguage, startTime: chunkStartTime, endTime: chunkEndTime)
         } catch {
-            emit("Transcription failed: \(error.localizedDescription)")
+            emit(.system("Transcription failed: \(error.localizedDescription)"))
         }
     }
 
@@ -202,30 +254,45 @@ public final class TranscriptionScheduler {
         guard !fresh.isEmpty else { return }
 
         let level = AudioLevelMeter.measure(fresh)
+        // ScreenCaptureKit/AVAudioConverter can produce a low residual noise floor even
+        // when the Mac is audibly silent. Never let that noise trigger a cloud request.
+        let effectiveSpeechThreshold = max(silenceThresholdRMS, 0.006)
         let voiceActivity = VoiceActivityDetector.analyze(
             samples: fresh,
             sampleRate: sampleRate,
-            rmsThreshold: silenceThresholdRMS
+            rmsThreshold: effectiveSpeechThreshold
         )
-        let hasSpeech = level.rms >= silenceThresholdRMS && voiceActivity.hasLikelySpeech
+        let hasSpeech = level.rms >= effectiveSpeechThreshold && voiceActivity.hasLikelySpeech
 
         if hasSpeech {
             if !isCapturingUtterance {
+                speechCandidateSamples.append(contentsOf: fresh)
+                let candidateDuration = Double(speechCandidateSamples.count) / Double(sampleRate)
+                guard candidateDuration >= 0.20 else { return }
+
                 isCapturingUtterance = true
-                utteranceSamples = preRollSamples
+                nextUtteranceID &+= 1
+                activeUtteranceID = nextUtteranceID
+                let preRollDuration = Double(preRollSamples.count) / Double(sampleRate)
+                utteranceStartTime = Date().addingTimeInterval(-(preRollDuration + candidateDuration))
+                utteranceSamples = preRollSamples + speechCandidateSamples
+                speechCandidateSamples.removeAll(keepingCapacity: true)
+            } else {
+                utteranceSamples.append(contentsOf: fresh)
             }
-            utteranceSamples.append(contentsOf: fresh)
             trailingSilenceSeconds = 0
+            requestPartialTranscriptIfNeeded()
 
             if utteranceDuration >= utteranceMaxSeconds {
                 await finishCurrentUtterance(reason: "max duration")
             }
         } else {
+            speechCandidateSamples.removeAll(keepingCapacity: true)
             rememberPreRoll(fresh)
 
             guard isCapturingUtterance else {
                 if verbose {
-                    emit(String(format: "Waiting for speech: rms %.6f, speech frames %d/%d", level.rms, voiceActivity.speechFrameCount, voiceActivity.totalFrameCount))
+                    emit(.system(String(format: "Waiting for speech: rms %.6f, speech frames %d/%d", level.rms, voiceActivity.speechFrameCount, voiceActivity.totalFrameCount)))
                 }
                 return
             }
@@ -245,7 +312,8 @@ public final class TranscriptionScheduler {
 
     private func rememberPreRoll(_ samples: [Float]) {
         preRollSamples.append(contentsOf: samples)
-        let maxSamples = Int(0.35 * Double(sampleRate))
+        let preRollSeconds = battleModeEnabled ? 0.25 : 0.35
+        let maxSamples = Int(preRollSeconds * Double(sampleRate))
         if preRollSamples.count > maxSamples {
             preRollSamples.removeFirst(preRollSamples.count - maxSamples)
         }
@@ -253,13 +321,18 @@ public final class TranscriptionScheduler {
 
     private func finishCurrentUtterance(reason: String) async {
         let samples = utteranceSamples
+        let utteranceID = activeUtteranceID
         let duration = Double(samples.count) / Double(sampleRate)
+        let capturedTrailingSilence = trailingSilenceSeconds
         isCapturingUtterance = false
         utteranceSamples.removeAll(keepingCapacity: true)
         trailingSilenceSeconds = 0
         preRollSamples.removeAll(keepingCapacity: true)
+        speechCandidateSamples.removeAll(keepingCapacity: true)
+        lastPartialNormalized = ""
 
-        guard duration >= 0.55 else {
+        let minimumDuration = battleModeEnabled ? 0.20 : 0.45
+        guard duration >= minimumDuration else {
             if verbose {
                 emit(String(format: "Skipping too-short utterance %.2fs", duration))
             }
@@ -278,13 +351,40 @@ public final class TranscriptionScheduler {
             emit(String(format: "Queueing utterance %.2fs (%@): rms %.6f, %.1f dBFS", duration, reason, level.rms, level.dbFS))
         }
 
-        enqueueUtterance(samples)
+        let endTime = reason == "pause" ? Date().addingTimeInterval(-capturedTrailingSilence) : Date()
+        let voiceSampleRate = sampleRate
+        let voiceSampleTask = voiceSpeakerTracker.map { tracker in
+            Task.detached(priority: .userInitiated) {
+                tracker.prepare(samples: samples, sampleRate: voiceSampleRate)
+            }
+        }
+        let utterance = Utterance(
+            id: utteranceID,
+            samples: samples,
+            startTime: utteranceStartTime,
+            endTime: endTime,
+            voiceSampleTask: voiceSampleTask
+        )
+
+        let deferredToPartial: Bool = transcriptionQueueLock.withLock {
+            guard battleModeEnabled,
+                  isPartialTranscribing,
+                  partialUtteranceID == utteranceID else { return false }
+            pendingPartialFinal = PendingPartialFinal(
+                utterance: utterance,
+                partialSampleCount: partialSampleCount
+            )
+            return true
+        }
+        if !deferredToPartial {
+            enqueueUtterance(utterance)
+        }
     }
 
-    private func enqueueUtterance(_ samples: [Float]) {
+    private func enqueueUtterance(_ utterance: Utterance) {
         var shouldStartDraining = false
         transcriptionQueueLock.withLock {
-            queuedUtterances.append(samples)
+            queuedUtterances.append(utterance)
             if !isDrainingTranscriptionQueue {
                 isDrainingTranscriptionQueue = true
                 shouldStartDraining = true
@@ -300,7 +400,7 @@ public final class TranscriptionScheduler {
 
     private func drainTranscriptionQueue() async {
         while true {
-            let nextUtterance: [Float]? = transcriptionQueueLock.withLock {
+            let nextUtterance: Utterance? = transcriptionQueueLock.withLock {
                 if queuedUtterances.isEmpty {
                     isDrainingTranscriptionQueue = false
                     return nil
@@ -308,23 +408,159 @@ public final class TranscriptionScheduler {
                 return queuedUtterances.removeFirst()
             }
 
-            guard let samples = nextUtterance else { return }
-            await transcribeAndPrint(samples)
+            guard let utterance = nextUtterance else { return }
+            await transcribeAndPrint(
+                utterance.samples,
+                startTime: utterance.startTime,
+                endTime: utterance.endTime,
+                voiceSampleTask: utterance.voiceSampleTask
+            )
         }
     }
 
-    private func transcribeAndPrint(_ samples: [Float]) async {
+    private func requestPartialTranscriptIfNeeded() {
+        guard battleModeEnabled, partialTranscriptsEnabled, let transcriber else { return }
+
+        let now = Date()
+        guard utteranceDuration >= 0.45,
+              now.timeIntervalSince(lastPartialRequestTime) >= 0.45 else { return }
+
+        var shouldStart = false
+        transcriptionQueueLock.withLock {
+            if !isPartialTranscribing {
+                isPartialTranscribing = true
+                partialUtteranceID = activeUtteranceID
+                partialSampleCount = utteranceSamples.count
+                lastPartialRequestTime = now
+                shouldStart = true
+            }
+        }
+        guard shouldStart else { return }
+
+        let samples = utteranceSamples
+        let utteranceID = activeUtteranceID
+        let startTime = utteranceStartTime
+        let endTime = now
+
+        Task.detached(priority: .userInitiated) { [weak self, transcriber] in
+            do {
+                let result = try await transcriber.transcribe(samples: samples, sampleRate: self?.sampleRate ?? 16_000)
+                await self?.handlePartialTranscriptResult(
+                    result,
+                    startTime: startTime,
+                    endTime: endTime,
+                    utteranceID: utteranceID
+                )
+            } catch {
+                self?.finishFailedPartial(for: utteranceID)
+                if self?.verbose == true {
+                    self?.emit(.system("Partial transcription failed: \(error.localizedDescription)"))
+                }
+            }
+        }
+    }
+
+    private func handlePartialTranscriptResult(
+        _ result: TranscriptResult,
+        startTime: Date,
+        endTime: Date,
+        utteranceID: UInt64
+    ) async {
+        let pendingFinal = finishPartialState(for: utteranceID)
+
+        if let pendingFinal {
+            let uncoveredSamples = max(0, pendingFinal.utterance.samples.count - pendingFinal.partialSampleCount)
+            let maxUncoveredSamples = Int(0.30 * Double(sampleRate))
+            let resultIsUsable = !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && result.noSpeechProbability < 0.40
+                && (result.tokenCount == 0 || result.averageTokenProbability >= 0.38)
+            if uncoveredSamples <= maxUncoveredSamples && resultIsUsable {
+                let voiceSample = await pendingFinal.utterance.voiceSampleTask?.value
+                handleTranscriptResult(
+                    result,
+                    startTime: pendingFinal.utterance.startTime,
+                    endTime: pendingFinal.utterance.endTime,
+                    voiceSample: voiceSample
+                )
+                return
+            }
+            enqueueUtterance(pendingFinal.utterance)
+        }
+
+        let outputText = collapseRepeatedPhrases(in: result.text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = normalizeForRepeatDetection(outputText)
+        guard result.noSpeechProbability < 0.40,
+              !normalized.isEmpty,
+              normalized != lastPartialNormalized,
+              !looksLikeDecoderPromptEcho(normalized),
+              !looksLikeCommonSilenceHallucination(normalized) else { return }
+
+        lastPartialNormalized = normalized
+        emit(makeTranscript(
+            originalText: outputText,
+            translatedText: translatedText(for: outputText, detectedLanguage: result.detectedLanguage),
+            detectedLanguage: result.detectedLanguage,
+            isPartial: true,
+            startTime: startTime,
+            endTime: endTime
+        ))
+    }
+
+    private func finishPartialState(for utteranceID: UInt64) -> PendingPartialFinal? {
+        transcriptionQueueLock.withLock {
+            isPartialTranscribing = false
+            if partialUtteranceID == utteranceID {
+                partialUtteranceID = nil
+                partialSampleCount = 0
+            }
+            guard pendingPartialFinal?.utterance.id == utteranceID else { return nil }
+            defer { self.pendingPartialFinal = nil }
+            return pendingPartialFinal
+        }
+    }
+
+    private func finishFailedPartial(for utteranceID: UInt64) {
+        let pendingFinal = finishPartialState(for: utteranceID)
+        if let pendingFinal {
+            enqueueUtterance(pendingFinal.utterance)
+        }
+    }
+
+    private func transcribeAndPrint(
+        _ samples: [Float],
+        startTime: Date,
+        endTime: Date,
+        voiceSampleTask: Task<VoiceSpeakerSample?, Never>?
+    ) async {
         guard let transcriber else { return }
 
         do {
             let result = try await transcriber.transcribe(samples: samples, sampleRate: sampleRate)
-            handleTranscriptResult(result)
+            let voiceSample = await voiceSampleTask?.value
+            handleTranscriptResult(
+                result,
+                startTime: startTime,
+                endTime: endTime,
+                voiceSample: voiceSample
+            )
         } catch {
-            emit("Transcription failed: \(error.localizedDescription)")
+            emit(.system("Transcription failed: \(error.localizedDescription)"))
         }
     }
 
-    private func handleTranscriptResult(_ result: TranscriptResult) {
+    private func handleTranscriptResult(
+        _ result: TranscriptResult,
+        startTime: Date,
+        endTime: Date,
+        voiceSample: VoiceSpeakerSample? = nil
+    ) {
+        guard result.noSpeechProbability < 0.40 else {
+            if verbose {
+                emit(String(format: "Skipping no-speech result: p %.2f, text: %@", result.noSpeechProbability, result.text))
+            }
+            return
+        }
+
         guard !result.text.isEmpty else {
             if verbose {
                 let language = result.detectedLanguage ?? "unknown"
@@ -333,7 +569,8 @@ public final class TranscriptionScheduler {
             return
         }
 
-        guard result.tokenCount == 0 || result.averageTokenProbability >= 0.38 else {
+        let minimumTokenProbability: Float = battleModeEnabled ? 0.25 : 0.38
+        guard result.tokenCount == 0 || result.averageTokenProbability >= minimumTokenProbability else {
             if verbose {
                 emit(String(format: "Skipping low-confidence transcript: p %.2f, tokens %d, text: %@", result.averageTokenProbability, result.tokenCount, result.text))
             }
@@ -344,16 +581,9 @@ public final class TranscriptionScheduler {
         let normalized = normalizeForRepeatDetection(outputText)
         guard !normalized.isEmpty else { return }
 
-        if let language = result.detectedLanguage,
-           isLikelyBadLanguageDetection(language) {
-            if verbose {
-                emit("Skipping unlikely detected language \(language): \(outputText)")
-            }
-            return
-        }
         guard !looksLikeDecoderPromptEcho(normalized) else { return }
         guard !looksLikeCommonSilenceHallucination(normalized) else { return }
-        if recentNormalizedOutputs.contains(normalized) {
+        if !realtimeUtteranceMode, recentNormalizedOutputs.contains(normalized) {
             if verbose {
                 emit("Skipping repeated transcript: \(outputText)")
             }
@@ -366,8 +596,52 @@ public final class TranscriptionScheduler {
         }
         rememberPrintedWords(outputText)
 
-        let language = result.detectedLanguage ?? "unknown"
-        emit("[detected: \(language)] \(outputText)")
+        let voiceAttribution = voiceSample.flatMap { voiceSpeakerTracker?.attribute(sample: $0) }
+        if let voiceAttribution {
+            emit(.voiceAttributed(
+                voiceAttribution,
+                originalText: outputText,
+                translatedText: translatedText(for: outputText, detectedLanguage: result.detectedLanguage),
+                detectedLanguage: result.detectedLanguage,
+                startTime: startTime.timeIntervalSinceReferenceDate,
+                endTime: endTime.timeIntervalSinceReferenceDate
+            ))
+        } else if enableSpeakerAttribution, let tracker = speakerTracker, let profile = activeProfile {
+            let overlapping = tracker.getStatesOverlapping(from: startTime, to: endTime)
+            let attr = SpeakerAttributionScorer.attribute(
+                speechStart: startTime,
+                speechEnd: endTime,
+                states: overlapping,
+                profile: profile
+            )
+
+            transcriptionQueueLock.withLock {
+                _lastAttributionResult = attr
+                _lastSegmentStart = startTime
+                _lastSegmentEnd = endTime
+            }
+
+            emit(makeAttributedTranscript(
+                attribution: attr,
+                originalText: outputText,
+                translatedText: translatedText(for: outputText, detectedLanguage: result.detectedLanguage),
+                detectedLanguage: result.detectedLanguage,
+                isPartial: false,
+                startTime: startTime,
+                endTime: endTime,
+                profile: profile,
+                overlappingStates: overlapping
+            ))
+        } else {
+            emit(makeTranscript(
+                originalText: outputText,
+                translatedText: translatedText(for: outputText, detectedLanguage: result.detectedLanguage),
+                detectedLanguage: result.detectedLanguage,
+                isPartial: false,
+                startTime: startTime,
+                endTime: endTime
+            ))
+        }
     }
 
     private func normalizeForRepeatDetection(_ text: String) -> String {
@@ -525,24 +799,19 @@ public final class TranscriptionScheduler {
             normalizedText.contains("like and subscribe")
     }
 
-    private func isLikelyBadLanguageDetection(_ language: String) -> Bool {
-        let allowedLanguages: Set<String> = [
-            "en", "nl", "de", "fr", "es", "it", "pt", "ru", "ar", "pl", "tr", "uk"
-        ]
-        return !allowedLanguages.contains(language.lowercased())
-    }
-
-    private func bufferOutput(_ text: String, language: String?) {
+    private func bufferOutput(_ text: String, language: String?, startTime: Date, endTime: Date) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         if pendingOutput.isEmpty {
             pendingOutput = trimmed
             pendingLanguage = language
+            pendingStartTime = startTime
         } else {
             pendingOutput += needsLeadingSpace(before: trimmed) ? " \(trimmed)" : trimmed
             pendingLanguage = pendingLanguage ?? language
         }
+        pendingEndTime = endTime
 
         flushPendingOutputIfUseful(force: false)
     }
@@ -566,16 +835,136 @@ public final class TranscriptionScheduler {
 
         guard shouldFlush else { return }
 
-        let language = pendingLanguage ?? "unknown"
-        emit("[detected: \(language)] \(trimmed)")
+        if enableSpeakerAttribution, let tracker = speakerTracker, let profile = activeProfile {
+            let overlapping = tracker.getStatesOverlapping(from: pendingStartTime, to: pendingEndTime)
+            let attr = SpeakerAttributionScorer.attribute(
+                speechStart: pendingStartTime,
+                speechEnd: pendingEndTime,
+                states: overlapping,
+                profile: profile
+            )
+
+            transcriptionQueueLock.withLock {
+                _lastAttributionResult = attr
+                _lastSegmentStart = pendingStartTime
+                _lastSegmentEnd = pendingEndTime
+            }
+
+            emit(makeAttributedTranscript(
+                attribution: attr,
+                originalText: trimmed,
+                translatedText: translatedText(for: trimmed, detectedLanguage: pendingLanguage),
+                detectedLanguage: pendingLanguage,
+                isPartial: false,
+                startTime: pendingStartTime,
+                endTime: pendingEndTime,
+                profile: profile,
+                overlappingStates: overlapping
+            ))
+        } else {
+            emit(makeTranscript(
+                originalText: trimmed,
+                translatedText: translatedText(for: trimmed, detectedLanguage: pendingLanguage),
+                detectedLanguage: pendingLanguage,
+                isPartial: false,
+                startTime: pendingStartTime,
+                endTime: pendingEndTime
+            ))
+        }
         rememberPrintedWords(trimmed)
         pendingOutput = ""
         pendingLanguage = nil
     }
 
-    private func emit(_ line: String) {
-        onOutput(line)
+    private func emit(_ transcript: AttributedTranscript) {
+        onOutput(transcript)
     }
+
+    private func makeTranscript(
+        originalText: String,
+        translatedText: String?,
+        detectedLanguage: String?,
+        isPartial: Bool,
+        startTime: Date,
+        endTime: Date
+    ) -> AttributedTranscript {
+        if enableSpeakerAttribution, let tracker = speakerTracker, let profile = activeProfile {
+            let overlapping = tracker.getStatesOverlapping(from: startTime, to: endTime)
+            let attr = SpeakerAttributionScorer.attribute(
+                speechStart: startTime,
+                speechEnd: endTime,
+                states: overlapping,
+                profile: profile
+            )
+
+            transcriptionQueueLock.withLock {
+                _lastAttributionResult = attr
+                _lastSegmentStart = startTime
+                _lastSegmentEnd = endTime
+            }
+
+            return makeAttributedTranscript(
+                attribution: attr,
+                originalText: originalText,
+                translatedText: translatedText,
+                detectedLanguage: detectedLanguage,
+                isPartial: isPartial,
+                startTime: startTime,
+                endTime: endTime,
+                profile: profile,
+                overlappingStates: overlapping
+            )
+        }
+
+        return .unattributed(
+            originalText: originalText,
+            translatedText: translatedText,
+            detectedLanguage: detectedLanguage,
+            isPartial: isPartial,
+            startTime: startTime.timeIntervalSinceReferenceDate,
+            endTime: endTime.timeIntervalSinceReferenceDate
+        )
+    }
+
+    private func makeAttributedTranscript(
+        attribution: AttributionResult,
+        originalText: String,
+        translatedText: String?,
+        detectedLanguage: String?,
+        isPartial: Bool,
+        startTime: Date,
+        endTime: Date,
+        profile: GameProfile,
+        overlappingStates: [SpeakerState]
+    ) -> AttributedTranscript {
+        let hadStale = overlappingStates.contains(where: { $0.continuousVisibleDuration > profile.staleThreshold })
+        return .from(
+            result: attribution,
+            originalText: originalText,
+            translatedText: translatedText,
+            detectedLanguage: detectedLanguage,
+            isPartial: isPartial,
+            startTime: startTime.timeIntervalSinceReferenceDate,
+            endTime: endTime.timeIntervalSinceReferenceDate,
+            profile: profile,
+            hadStaleCandidate: hadStale
+        )
+    }
+
+    private func translatedText(for text: String, detectedLanguage: String?) -> String? {
+        guard let targetLanguage else { return nil }
+        if targetLanguage == "en" {
+            return text
+        }
+        guard detectedLanguage?.lowercased() == targetLanguage else { return nil }
+        return text
+    }
+
+    /// Emits a plain-text system/verbose message as a system AttributedTranscript.
+    private func emit(_ text: String) {
+        onOutput(.system(text))
+    }
+
 
     private func needsLeadingSpace(before text: String) -> Bool {
         guard let first = text.first else { return false }

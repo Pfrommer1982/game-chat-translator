@@ -1,8 +1,8 @@
 # Game Chat Translator
 
-Local macOS command-line prototype for near real-time game voice-chat translation.
+macOS app and command-line prototype for near real-time game voice-chat translation.
 
-It captures macOS system audio with ScreenCaptureKit, keeps captured audio in RAM, runs whisper.cpp in-process, and can translate detected speech to English locally. It was built for setups like PS Remote Play audio while playing on a PS5/TV.
+It captures macOS system audio with ScreenCaptureKit and keeps captured audio in RAM. The GUI supports Groq, OpenAI, custom OpenAI-compatible audio endpoints, and local whisper.cpp models. Every cloud provider can fall back to the selected local model automatically. It was built for setups like PS Remote Play audio while playing on a PS5/TV.
 
 ## What It Does
 
@@ -63,15 +63,15 @@ cmake --build vendor/whisper.cpp/build --config Release
 
 ## Download A Model
 
-Recommended first model:
+Recommended realtime model:
 
 ```sh
 mkdir -p models
-curl -L --fail -o models/ggml-small.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+curl -L --fail -o models/ggml-base.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
 ```
 
-`small` is a good baseline for multilingual game chat. `base` is faster but less accurate.
+`base` is the default balance for multilingual game chat. The GUI recommends `tiny`, `base`, or `small` from the Mac's CPU and memory, and can open any compatible model file.
 
 Do not commit model files to GitHub.
 
@@ -87,9 +87,16 @@ swift build
 swift run GameChatTranslatorApp
 ```
 
-The GUI lets you choose a model, select a preset, start/stop translation, open macOS privacy settings, and copy or clear the live transcript.
+The GUI lets you choose a provider and model, select a preset, start/stop translation, open macOS privacy settings, and copy or clear the live transcript.
 
-The packaged `.app` runs capture and transcription in-process. There is no separate audio-capture helper executable, so macOS only needs Screen & System Audio Recording permission for `GameChatTranslator.app` itself.
+The packaged `.app` runs capture in-process. There is no separate audio-capture helper executable, so macOS only needs Screen & System Audio Recording permission for `GameChatTranslator.app` itself. Local Mode keeps translation on the Mac. Cloud modes send short utterances to the selected audio-translation endpoint and store each provider key in the user's local Application Support folder with user-only file permissions. Failed cloud requests immediately use the selected local model. Battle Mode retains queued utterances and allows repeated commands instead of discarding them as duplicate text.
+
+Provider options:
+
+- **Groq**: `whisper-large-v3-turbo` for speed or `whisper-large-v3` for quality.
+- **OpenAI**: `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, or `whisper-1`.
+- **Compatible API**: enter a full OpenAI-compatible audio translations endpoint, API key, and model name.
+- **Local**: select any compatible whisper.cpp model discovered by the app or choose one from disk.
 
 ## Build A Release App
 
@@ -106,7 +113,7 @@ dist/GameChatTranslator.app
 dist/GameChatTranslator-0.1.0.zip
 ```
 
-If `models/ggml-small.bin` exists, the script bundles it into the app so first launch works without choosing a model. To ship without a bundled model:
+If `models/ggml-base.bin` exists, the script bundles it into the app so first launch works without choosing a model. To ship without a bundled model:
 
 ```sh
 INCLUDE_MODEL=none ./scripts/build_app.sh
@@ -188,7 +195,8 @@ Captured audio is not written to disk.
 - No microphone input.
 - No cloud APIs.
 - No virtual audio drivers.
-- Audio exists as in-process RAM buffers only.
+- Audio exists as in-process RAM buffers only and is not saved to disk.
+- Groq Mode uploads short utterances for English translation; Local Mode does not send audio over the network.
 - Model files are read from disk, but captured audio is not saved.
 - Recognized text is printed to stdout.
 
@@ -197,7 +205,7 @@ Captured audio is not written to disk.
 - The packaged app is unsigned/ad-hoc unless you build it with your own Developer ID identity.
 - Game audio and voice chat are mixed together by Remote Play, so loud explosions/music can still hurt accuracy.
 - Whisper translation is best with complete phrases. Extremely short chunks are faster but less accurate.
-- `small` is the practical starting point. `base` is faster but worse; larger models are better but slower.
+- `base` is the practical realtime starting point. `tiny` is faster but less accurate; `small` and larger models improve accuracy at the cost of latency.
 
 ## Troubleshooting
 

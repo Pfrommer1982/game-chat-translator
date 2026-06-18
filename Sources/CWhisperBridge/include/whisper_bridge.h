@@ -13,6 +13,7 @@ typedef struct {
     const char * text;
     const char * language;
     float average_token_probability;
+    float no_speech_probability;
     int token_count;
 } WhisperBridgeResult;
 

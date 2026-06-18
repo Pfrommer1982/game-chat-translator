@@ -6,9 +6,10 @@ APP_NAME="${APP_NAME:-GameChatTranslator}"
 PRODUCT_NAME="GameChatTranslatorApp"
 BUNDLE_ID="${BUNDLE_ID:-dev.pfrommer.gamechattranslator}"
 APP_VERSION="${APP_VERSION:-0.1.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M%S)}"
 CONFIGURATION="${CONFIGURATION:-release}"
 DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-13.3}"
+LOCAL_DESIGNATED_REQUIREMENT="=designated => identifier \"$BUNDLE_ID\""
 DIST_DIR="$ROOT_DIR/dist"
 APP_PATH="$DIST_DIR/$APP_NAME.app"
 ZIP_PATH="$DIST_DIR/$APP_NAME-$APP_VERSION.zip"
@@ -51,6 +52,18 @@ echo "Creating app bundle..."
 rm -rf "$APP_PATH" "$ZIP_PATH"
 mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 
+ICON_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/game-chat-translator-icon-XXXXXXXX")"
+ICONSET_DIR="$ICON_WORK_DIR/GameChatTranslator.iconset"
+mkdir -p "$ICONSET_DIR"
+xcrun swift "$ROOT_DIR/scripts/generate_app_icon.swift" "$ICONSET_DIR"
+iconutil -c icns -o "$RESOURCES_DIR/GameChatTranslator.icns" "$ICONSET_DIR"
+rm -rf "$ICON_WORK_DIR"
+
+if [[ ! -s "$RESOURCES_DIR/GameChatTranslator.icns" ]]; then
+  echo "App icon generation failed."
+  exit 1
+fi
+
 ditto "$APP_BINARY" "$MACOS_DIR/$APP_NAME"
 chmod 755 "$MACOS_DIR/$APP_NAME"
 
@@ -68,6 +81,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
+  <key>CFBundleIconFile</key>
+  <string>GameChatTranslator</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -89,7 +104,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Game Chat Translator captures system audio locally so it can transcribe and translate voice chat. Captured audio is kept in memory and is not saved to disk.</string>
+  <string>Game Chat Translator captures system audio to translate voice chat. Audio stays in memory; Groq Mode sends short utterances to Groq, while Local Mode keeps processing on this Mac.</string>
 </dict>
 </plist>
 PLIST
@@ -109,8 +124,8 @@ copy_dylibs_from "$WHISPER_BUILD_DIR/ggml/src"
 copy_dylibs_from "$WHISPER_BUILD_DIR/ggml/src/ggml-blas"
 
 MODEL_TO_BUNDLE="${INCLUDE_MODEL:-}"
-if [[ -z "$MODEL_TO_BUNDLE" && -f "$ROOT_DIR/models/ggml-small.bin" ]]; then
-  MODEL_TO_BUNDLE="$ROOT_DIR/models/ggml-small.bin"
+if [[ -z "$MODEL_TO_BUNDLE" && -f "$ROOT_DIR/models/ggml-base.bin" ]]; then
+  MODEL_TO_BUNDLE="$ROOT_DIR/models/ggml-base.bin"
 fi
 
 if [[ "$MODEL_TO_BUNDLE" != "" && "$MODEL_TO_BUNDLE" != "none" ]]; then
@@ -120,10 +135,7 @@ if [[ "$MODEL_TO_BUNDLE" != "" && "$MODEL_TO_BUNDLE" != "none" ]]; then
   fi
   mkdir -p "$RESOURCES_DIR/models"
   ditto "$MODEL_TO_BUNDLE" "$RESOURCES_DIR/models/$(basename "$MODEL_TO_BUNDLE")"
-  if [[ "$(basename "$MODEL_TO_BUNDLE")" != "ggml-small.bin" ]]; then
-    echo "Bundled model: $(basename "$MODEL_TO_BUNDLE")"
-    echo "The GUI default still points to ggml-small.bin; choose this model manually on first launch."
-  fi
+  echo "Bundled model: $(basename "$MODEL_TO_BUNDLE")"
 else
   echo "No model bundled. Users can choose a local ggml model in the app."
 fi
@@ -153,8 +165,8 @@ if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
   find "$FRAMEWORKS_DIR" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' dylib; do
     codesign --force --sign - "$dylib"
   done
-  codesign --force --sign - "$MACOS_DIR/$APP_NAME"
-  codesign --force --sign - "$APP_PATH"
+  codesign --force --sign - --requirements "$LOCAL_DESIGNATED_REQUIREMENT" "$MACOS_DIR/$APP_NAME"
+  codesign --force --sign - --requirements "$LOCAL_DESIGNATED_REQUIREMENT" "$APP_PATH"
 else
   find "$FRAMEWORKS_DIR" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' dylib; do
     codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$dylib"
@@ -164,6 +176,13 @@ else
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -f "$APP_PATH"
+  fi
+fi
 
 echo "Creating release zip..."
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"

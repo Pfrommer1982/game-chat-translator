@@ -28,9 +28,10 @@ enum VoiceActivityDetector {
             let rms = frameRMS(frame)
             let zcr = zeroCrossingRate(frame)
 
-            // Speech usually has moderate zero-crossing structure. Pure silence, low rumbles,
-            // many explosions, and clipped transients tend to fall outside this window.
-            if rms >= rmsThreshold && zcr >= 0.015 && zcr <= 0.22 {
+            // Keep the filter permissive: quiet/deep voices and compressed game chat can
+            // have unusually low or high zero-crossing rates. Loud frames bypass ZCR.
+            let hasSpeechStructure = zcr >= 0.005 && zcr <= 0.35
+            if rms >= rmsThreshold && (hasSpeechStructure || rms >= rmsThreshold * 2.5) {
                 speechFrames += 1
             }
 
@@ -40,7 +41,7 @@ enum VoiceActivityDetector {
 
         let ratio = totalFrames > 0 ? Float(speechFrames) / Float(totalFrames) : 0
         return VoiceActivityResult(
-            hasLikelySpeech: speechFrames >= 3 && ratio >= 0.12,
+            hasLikelySpeech: speechFrames >= 2 && ratio >= 0.08,
             speechFrameRatio: ratio,
             speechFrameCount: speechFrames,
             totalFrameCount: totalFrames
@@ -71,4 +72,3 @@ enum VoiceActivityDetector {
         return Float(crossings) / Float(frame.count - 1)
     }
 }
-

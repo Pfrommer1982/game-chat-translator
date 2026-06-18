@@ -210,6 +210,7 @@ private func run(_ config: AppConfiguration) async throws {
         realtimeUtteranceMode: config.realtime,
         utteranceEndSilenceSeconds: config.utteranceEndSilenceSeconds,
         utteranceMaxSeconds: config.utteranceMaxSeconds,
+        targetLanguage: config.translateToEnglish ? "en" : nil,
         verbose: config.verbose
     )
 

@@ -6,7 +6,24 @@ public struct TranscriptResult {
     public let detectedLanguage: String?
     public let durationSeconds: Double
     public let averageTokenProbability: Float
+    public let noSpeechProbability: Float
     public let tokenCount: Int
+
+    public init(
+        text: String,
+        detectedLanguage: String?,
+        durationSeconds: Double,
+        averageTokenProbability: Float,
+        noSpeechProbability: Float = 0,
+        tokenCount: Int
+    ) {
+        self.text = text
+        self.detectedLanguage = detectedLanguage
+        self.durationSeconds = durationSeconds
+        self.averageTokenProbability = averageTokenProbability
+        self.noSpeechProbability = noSpeechProbability
+        self.tokenCount = tokenCount
+    }
 }
 
 public enum WhisperTranscriberError: Error, LocalizedError {
@@ -26,7 +43,7 @@ public enum WhisperTranscriberError: Error, LocalizedError {
     }
 }
 
-public final class WhisperTranscriber {
+public final class WhisperTranscriber: AudioTranscribing {
     private let bridge: OpaquePointer
 
     public init(
@@ -83,6 +100,7 @@ public final class WhisperTranscriber {
                 detectedLanguage: language,
                 durationSeconds: Double(samples.count) / Double(sampleRate),
                 averageTokenProbability: result.average_token_probability,
+                noSpeechProbability: result.no_speech_probability,
                 tokenCount: Int(result.token_count)
             )
         }.value
